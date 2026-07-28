@@ -88,11 +88,31 @@ def solid_i420(w, h, yv, uv, vv):
 
 def convert(mod, data, fmt, w, h, out_format="rgb24", matrix="bt601",
             color_range="limited", chroma="nearest"):
+    kind = mod.OUT_FORMATS[out_format][0]
     tables = None
-    if mod.OUT_FORMATS[out_format][0] in ("rgb", "bgr", "gray"):
-        bits = mod.OUT_FORMATS[out_format][2]
-        tables = mod.ColorTables(fmt, bits, matrix, color_range)
+    if kind in ("rgb", "bgr", "gray"):
+        tables = mod.ColorTables(fmt, mod.OUT_FORMATS[out_format][2],
+                                 matrix, color_range)
+    elif kind in ("rgb332", "rgb444", "rgb565", "rgbx32"):
+        tables = mod.ColorTables(fmt, 8, matrix, color_range)
     return mod.convert_frame(data, fmt, w, h, out_format, tables, chroma)
+
+
+def unpack_rgb444(blob, w, h):
+    """rgb444 바이트열을 (R,G,B) 4비트 값 리스트로 되돌린다."""
+    r = [0] * (w * h)
+    g = [0] * (w * h)
+    b = [0] * (w * h)
+    i = 0
+    for row in range(h):
+        for col in range(0, w, 2):
+            b0, b1, b2 = blob[i], blob[i + 1], blob[i + 2]
+            i += 3
+            p = row * w + col
+            r[p], g[p] = b0 >> 4, b0 & 15
+            b[p], r[p + 1] = b1 >> 4, b1 & 15
+            g[p + 1], b[p + 1] = b2 >> 4, b2 & 15
+    return r, g, b
 
 
 # --------------------------------------------------------------------------
@@ -295,13 +315,33 @@ class TestSizePreserving(unittest.TestCase):
         self.assertEqual(os.path.getsize(out), len(blob))
 
     def test_size_preserving_list_is_accurate(self):
+        # SIZE_PRESERVING 은 입력이 무엇이든 크기가 같아야 한다
+        w = h = 16
+        for name in y2r.SIZE_PRESERVING:
+            for fmt_name in ("i420", "nv12", "i422", "yuyv", "i444", "gray",
+                             "yuv420p10le", "p010"):
+                fmt = y2r.resolve_format(fmt_name)
+                self.assertEqual(y2r.out_frame_size(name, fmt, w, h),
+                                 y2r.frame_size(fmt, w, h),
+                                 "%s / %s" % (name, fmt_name))
+
+    def test_rgb24_doubles_420_input(self):
         fmt = y2r.resolve_format("i420")
         w = h = 16
-        src = y2r.frame_size(fmt, w, h)
-        for name in y2r.OUT_FORMATS:
-            same = y2r.out_frame_size(name, fmt, w, h) == src
-            self.assertEqual(same, name in y2r.SIZE_PRESERVING,
-                             "%s 의 크기 보존 여부가 목록과 다릅니다" % name)
+        self.assertEqual(y2r.out_frame_size("rgb24", fmt, w, h),
+                         y2r.frame_size(fmt, w, h) * 2)
+
+    def test_rgb_same_matches_every_input(self):
+        # rgb-same 이 고른 포맷은 그 입력에서 반드시 크기가 같아야 한다
+        w = h = 16
+        for fmt_name in ("i420", "nv12", "yv12", "i422", "yuyv", "i444",
+                         "gray", "yuv420p10le", "yuv422p10le", "yuv444p10le",
+                         "p010"):
+            fmt = y2r.resolve_format(fmt_name)
+            picked = y2r.rgb_same_size_format(fmt)
+            self.assertEqual(y2r.out_frame_size(picked, fmt, w, h),
+                             y2r.frame_size(fmt, w, h),
+                             "%s -> %s" % (fmt_name, picked))
 
     def test_source_is_untouched(self):
         blob = b"\x42" * 4096
@@ -309,6 +349,155 @@ class TestSizePreserving(unittest.TestCase):
         y2r.main([self.src_dir, "-o", self.out_dir, "-q", "--out-format", "copy"])
         with open(path, "rb") as f:
             self.assertEqual(f.read(), blob)
+
+
+class TestRgbSameSize(unittest.TestCase):
+    """RGB 로 바꾸면서도 파일 크기가 그대로여야 한다."""
+
+    W, H = 16, 16
+
+    def _blob(self, fmt_name, frames=1):
+        fmt = y2r.resolve_format(fmt_name)
+        out = b""
+        for i in range(frames):
+            y, u, v = make_planes(self.W, self.H, fmt, seed=i)
+            out += pack(fmt, self.W, self.H, y, u, v)
+        return fmt, out
+
+    def test_bits_per_pixel(self):
+        expect = {"gray": 8, "i420": 12, "nv12": 12, "i422": 16, "yuyv": 16,
+                  "i444": 24, "yuv420p10le": 24, "yuv422p10le": 32,
+                  "yuv444p10le": 48}
+        for name, bits in expect.items():
+            self.assertEqual(y2r.bits_per_pixel(y2r.resolve_format(name)), bits,
+                             "%s 의 픽셀당 비트 수" % name)
+
+    def test_picks_matching_format(self):
+        expect = {"i420": "rgb444", "nv12": "rgb444", "i422": "rgb565le",
+                  "yuyv": "rgb565le", "i444": "rgb24", "gray": "rgb332",
+                  "yuv420p10le": "rgb24", "yuv422p10le": "rgbx32",
+                  "yuv444p10le": "rgb48le"}
+        for name, out in expect.items():
+            self.assertEqual(
+                y2r.rgb_same_size_format(y2r.resolve_format(name)), out, name)
+
+    def test_output_size_equals_input_size(self):
+        for name in ("i420", "nv12", "i422", "yuyv", "i444", "gray"):
+            fmt, blob = self._blob(name)
+            out_name = y2r.rgb_same_size_format(fmt)
+            out = convert(y2r, blob, fmt, self.W, self.H, out_name)
+            self.assertEqual(len(out), len(blob),
+                             "%s -> %s 크기가 달라졌습니다" % (name, out_name))
+
+    def test_packed_sizes(self):
+        fmt = y2r.resolve_format("i444")
+        n = self.W * self.H
+        for out_name, expect in (("rgb332", n), ("rgb444", n * 3 // 2),
+                                 ("rgb565le", n * 2), ("rgbx32", n * 4),
+                                 ("rgb24", n * 3)):
+            self.assertEqual(
+                y2r.out_frame_size(out_name, fmt, self.W, self.H), expect)
+            _, blob = self._blob("i444")
+            out = convert(y2r, blob, fmt, self.W, self.H, out_name)
+            self.assertEqual(len(out), expect, out_name)
+
+    def test_rgb444_packing_layout(self):
+        # 흰색 한 프레임: 모든 채널이 15 여야 하고, 바이트는 전부 0xFF
+        fmt = y2r.resolve_format("i420")
+        w = h = 4
+        data = solid_i420(w, h, 235, 128, 128)
+        out = convert(y2r, data, fmt, w, h, "rgb444")
+        self.assertEqual(len(out), w * h * 3 // 2)
+        self.assertEqual(out, b"\xff" * len(out))
+        r, g, b = unpack_rgb444(out, w, h)
+        self.assertEqual(set(r) | set(g) | set(b), {15})
+
+    def test_rgb444_black_and_primary(self):
+        fmt = y2r.resolve_format("i420")
+        w = h = 4
+        black = convert(y2r, solid_i420(w, h, 16, 128, 128), fmt, w, h, "rgb444")
+        self.assertEqual(black, b"\x00" * len(black))
+        red = convert(y2r, solid_i420(w, h, 81, 90, 240), fmt, w, h, "rgb444")
+        r, g, b = unpack_rgb444(red, w, h)
+        self.assertEqual(r[0], 15)
+        self.assertLessEqual(max(g[0], b[0]), 1)
+
+    def test_rgb565_channel_layout(self):
+        fmt = y2r.resolve_format("i422")
+        w, h = 4, 2
+        y = [235] * (w * h)
+        u = [128] * (w // 2 * h)
+        v = [128] * (w // 2 * h)
+        out = convert(y2r, pack(fmt, w, h, y, u, v), fmt, w, h, "rgb565le")
+        self.assertEqual(len(out), w * h * 2)
+        self.assertEqual(out[0:2], b"\xff\xff")      # 흰색 = 0xFFFF
+
+    def test_rgb332_white_and_black(self):
+        fmt = y2r.resolve_format("gray")
+        w, h = 4, 2
+        white = convert(y2r, bytes([235] * (w * h)), fmt, w, h, "rgb332")
+        self.assertEqual(white, b"\xff" * (w * h))
+        black = convert(y2r, bytes([16] * (w * h)), fmt, w, h, "rgb332")
+        self.assertEqual(black, b"\x00" * (w * h))
+
+    def test_rgbx32_padding_byte(self):
+        fmt = y2r.resolve_format("i444")
+        _, blob = self._blob("i444")
+        out = convert(y2r, blob, fmt, self.W, self.H, "rgbx32")
+        self.assertEqual(set(out[3::4]), {255})
+        rgb = convert(y2r, blob, fmt, self.W, self.H, "rgb24")
+        self.assertEqual(bytes(out[0::4]), bytes(rgb[0::3]))
+        self.assertEqual(bytes(out[1::4]), bytes(rgb[1::3]))
+        self.assertEqual(bytes(out[2::4]), bytes(rgb[2::3]))
+
+    def test_rgb444_quantizes_rgb24(self):
+        # rgb444 값은 rgb24 값을 4비트로 반올림한 것과 같아야 한다
+        fmt, blob = self._blob("i420")
+        rgb = convert(y2r, blob, fmt, self.W, self.H, "rgb24")
+        packed = convert(y2r, blob, fmt, self.W, self.H, "rgb444")
+        r, g, b = unpack_rgb444(packed, self.W, self.H)
+        for i in range(self.W * self.H):
+            for got, full in ((r[i], rgb[i * 3]), (g[i], rgb[i * 3 + 1]),
+                              (b[i], rgb[i * 3 + 2])):
+                self.assertEqual(got, (full * 15 + 127) // 255)
+
+    def test_odd_width_rejected_for_rgb444(self):
+        d = tempfile.mkdtemp(prefix="yuv2raw_444_")
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "a.yuv")
+        with open(path, "wb") as f:
+            f.write(b"\x10" * (15 * 8 * 3))
+        opts = y2r.Options(out_format="rgb444")
+        with self.assertRaises(y2r.ConversionError):
+            y2r.plan_job(path, os.path.join(d, "out"), opts,
+                         fmt=y2r.resolve_format("i444"), size=(15, 8))
+        # 가로가 짝수면 통과한다
+        y2r.plan_job(path, os.path.join(d, "out"), opts,
+                     fmt=y2r.resolve_format("i444"), size=(10, 12))
+
+    def test_end_to_end_keeps_file_size(self):
+        d = tempfile.mkdtemp(prefix="yuv2raw_same_")
+        self.addCleanup(shutil.rmtree, d, True)
+        src_dir = os.path.join(d, "in")
+        os.makedirs(src_dir)
+        sizes = {}
+        for name, fmt_name in (("a_16x16_i420.yuv", "i420"),
+                               ("b_16x16_i422.yuv", "i422"),
+                               ("c_16x16_i444.yuv", "i444")):
+            fmt, blob = self._blob(fmt_name, frames=2)
+            with open(os.path.join(src_dir, name), "wb") as f:
+                f.write(blob)
+            sizes[name] = len(blob)
+        out_dir = os.path.join(d, "out")
+        rc = y2r.main([src_dir, "-o", out_dir, "-q",
+                       "--out-format", y2r.RGB_SAME])
+        self.assertEqual(rc, 0)
+        produced = [n for n in os.listdir(out_dir) if n.endswith(".raw")]
+        self.assertEqual(len(produced), 3)
+        for name, size in sizes.items():
+            match = [n for n in produced if n.startswith(os.path.splitext(name)[0])]
+            self.assertEqual(os.path.getsize(os.path.join(out_dir, match[0])),
+                             size, "%s 크기가 바뀌었습니다" % name)
 
 
 class TestColorCorrectness(unittest.TestCase):

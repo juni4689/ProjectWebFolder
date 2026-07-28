@@ -6,8 +6,8 @@ rem  Usage 1) Drag a folder onto this file.
 rem  Usage 2) Double-click, then type the folder path.
 rem
 rem  It asks two things:
-rem    1. output type - keep the file size, or convert to RGB24
-rem    2. resolution  - only when you pick RGB24
+rem    1. output type - keep the file size, convert to RGB, or both
+rem    2. resolution  - only when the output needs it
 rem
 rem  Output goes to <folder>\raw_out. Source files are never modified.
 rem
@@ -54,16 +54,19 @@ if "%TARGET:~-1%"=="\" set "TARGET=%TARGET:~0,-1%"
 
 echo.
 echo Output type:
-echo   1) same size - keep every byte and the exact file size (default)
-echo   2) RGB24     - convert YUV to RGB; the file becomes 2x larger
+echo   1) same size      - keep every byte; the file size never changes (default)
+echo   2) RGB24          - convert to RGB; the file becomes 2x larger
+echo   3) RGB, same size - convert to RGB and keep the file size
+echo                       (fewer colour steps: 4 bits per channel for 4:2:0)
 set "CHOICE="
 set /p "CHOICE=Choice [1]: "
 
 set "OUTFMT=copy"
 if "%CHOICE%"=="2" set "OUTFMT=rgb24"
+if "%CHOICE%"=="3" set "OUTFMT=rgb-same"
 set "OPTIONS=--out-format %OUTFMT%"
 
-if not "%OUTFMT%"=="rgb24" goto :run
+if "%OUTFMT%"=="copy" goto :run
 
 echo.
 set "SIZE=%DEFAULT_SIZE%"

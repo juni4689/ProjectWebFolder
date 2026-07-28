@@ -40,7 +40,7 @@ except Exception:  # pragma: no cover - numpy 미설치 환경
 if os.environ.get("YUV2RAW_NO_NUMPY"):
     _np = None
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 FIX = 16          # 고정소수점 비트 수
 FIX_ONE = 1 << FIX
@@ -220,6 +220,10 @@ OUT_FORMATS = {
     "bgr24":    ("bgr", 3, 8,  "BGR 인터리브 8비트"),
     "rgb48le":  ("rgb", 3, 16, "RGB 인터리브 16비트 리틀엔디안"),
     "bgr48le":  ("bgr", 3, 16, "BGR 인터리브 16비트 리틀엔디안"),
+    "rgb332":   ("rgb332", 1, 8, "RGB 3-3-2비트 (픽셀당 1바이트)"),
+    "rgb444":   ("rgb444", 0, 0, "RGB 4-4-4비트 (2픽셀당 3바이트)"),
+    "rgb565le": ("rgb565", 1, 16, "RGB 5-6-5비트 리틀엔디안 (픽셀당 2바이트)"),
+    "rgbx32":   ("rgbx32", 4, 8, "RGB 8-8-8비트 + 패딩 1바이트 (픽셀당 4바이트)"),
     "gray8":    ("gray", 1, 8,  "휘도만 8비트"),
     "gray16le": ("gray", 1, 16, "휘도만 16비트 리틀엔디안"),
     "yuv444":   ("yuv444", 3, 0, "Y,U,V 인터리브 (색공간 변환 없음, 원본 비트수 유지)"),
@@ -236,11 +240,54 @@ MATRICES = {
 #: 프레임당 바이트 수가 입력과 완전히 같은 출력 포맷(= 파일 크기가 안 바뀜)
 SIZE_PRESERVING = ("copy", "planar")
 
+#: --out-format 에 쓸 수 있는 특수 값. 입력의 픽셀당 비트 수와 같은 RGB
+#: 패킹을 골라 주므로, RGB 로 바꾸면서도 파일 크기가 그대로 유지된다.
+RGB_SAME = "rgb-same"
+
+#: 픽셀당 비트 수 -> 크기가 정확히 같아지는 RGB 패킹
+RGB_BY_BITS = {
+    8:  "rgb332",
+    12: "rgb444",
+    16: "rgb565le",
+    24: "rgb24",
+    32: "rgbx32",
+    48: "rgb48le",
+}
+
+#: 채널당 비트 수가 8보다 작아 색이 뭉개지는 출력(경고를 띄운다)
+REDUCED_COLOR = {
+    "rgb332":   "채널당 3-3-2비트, 256색",
+    "rgb444":   "채널당 4비트, 4096색",
+    "rgb565le": "채널당 5-6-5비트, 65536색",
+}
+
+
+def bits_per_pixel(fmt):
+    """입력 포맷의 픽셀당 비트 수. 4:2:0 8비트면 12, 4:2:2 8비트면 16."""
+    bits = 8 * fmt.bytes_per_sample
+    if fmt.kind == "gray":
+        return bits
+    n = fmt.sx * fmt.sy
+    return (n + 2) * bits // n
+
+
+def rgb_same_size_format(fmt):
+    """이 입력과 파일 크기가 정확히 같아지는 RGB 출력 포맷 이름."""
+    bits = bits_per_pixel(fmt)
+    name = RGB_BY_BITS.get(bits)
+    if name is None:
+        raise ConversionError(
+            "%s(픽셀당 %d비트)와 크기가 같아지는 RGB 포맷이 없습니다. "
+            "--out-format 으로 직접 골라 주세요." % (fmt.name, bits))
+    return name
+
 
 def out_frame_size(out_format, fmt, width, height):
     kind, nch, bits, _ = OUT_FORMATS[out_format]
     if kind in ("planar", "copy"):
         return frame_size(fmt, width, height)
+    if kind == "rgb444":
+        return width * height * 3 // 2
     if kind == "yuv444":
         return width * height * 3 * fmt.bytes_per_sample
     return width * height * nch * (bits // 8)
@@ -553,6 +600,9 @@ def convert_frame(data, fmt, width, height, out_format, tables, chroma_method):
 
     if kind == "yuv444":
         return _pack_yuv444(planes.y, u, v, width, height, fmt.bytes_per_sample)
+    if kind in ("rgb332", "rgb444", "rgb565", "rgbx32"):
+        r, g, b = _rgb_planes(planes.y, u, v, width, height, tables)
+        return _pack_low_rgb(r, g, b, width, height, kind)
     return _convert_rgb(planes.y, u, v, width, height, tables, kind == "bgr")
 
 
@@ -611,6 +661,110 @@ def _convert_gray(planes, tables):
     ylut, clamp = tables.ylut, tables.clamp
     vals = [clamp[ylut[s] >> FIX] for s in planes.y]
     return bytes(vals) if tables.out_bits <= 8 else array("H", vals).tobytes()
+
+
+_DEPTH_LUTS = {}
+
+
+def depth_lut(bits):
+    """8비트 값을 bits 비트로 줄이는 표(반올림)."""
+    lut = _DEPTH_LUTS.get(bits)
+    if lut is None:
+        top = (1 << bits) - 1
+        lut = [(v * top + 127) // 255 for v in range(256)]
+        if _np is not None:
+            lut = _np.array(lut, dtype=_np.uint16)
+        _DEPTH_LUTS[bits] = lut
+    return lut
+
+
+def _rgb_planes(y, u, v, w, h, tables):
+    """8비트 R, G, B 를 채널별로 돌려준다(패킹 포맷용)."""
+    if _np is not None:
+        yv = tables.ylut[y]
+        return (tables.clamp[(yv + tables.rv[v]) >> FIX],
+                tables.clamp[(yv + tables.gu[u] + tables.gv[v]) >> FIX],
+                tables.clamp[(yv + tables.bu[u]) >> FIX])
+    ylut, clamp = tables.ylut, tables.clamp
+    rv, gu, gv, bu = tables.rv, tables.gu, tables.gv, tables.bu
+    rr, gg, bb = [], [], []
+    for row in range(h):
+        s = row * w
+        e = s + w
+        yr, ur, vr = y[s:e], u[s:e], v[s:e]
+        rr.append(bytes(clamp[(ylut[a] + rv[c]) >> FIX] for a, c in zip(yr, vr)))
+        gg.append(bytes(clamp[(ylut[a] + gu[b] + gv[c]) >> FIX]
+                        for a, b, c in zip(yr, ur, vr)))
+        bb.append(bytes(clamp[(ylut[a] + bu[b]) >> FIX] for a, b in zip(yr, ur)))
+    return b"".join(rr), b"".join(gg), b"".join(bb)
+
+
+def _pack_low_rgb(r, g, b, w, h, kind):
+    """8비트 R,G,B 를 좁은 RGB 포맷으로 눌러 담는다.
+
+    rgb444 는 두 픽셀을 3바이트에 담는다(R0G0 B0R1 G1B1). 이 배치라야
+    픽셀당 12비트가 되어 4:2:0 입력과 파일 크기가 정확히 같아진다.
+    """
+    if _np is not None:
+        return _pack_low_rgb_np(r, g, b, w, h, kind)
+    return _pack_low_rgb_py(r, g, b, w, h, kind)
+
+
+def _pack_low_rgb_np(r, g, b, w, h, kind):
+    if kind == "rgbx32":
+        out = _np.empty((h, w, 4), dtype=_np.uint8)
+        out[:, :, 0], out[:, :, 1], out[:, :, 2] = r, g, b
+        out[:, :, 3] = 255
+        return out.tobytes()
+    if kind == "rgb332":
+        r3, g3, b2 = depth_lut(3)[r], depth_lut(3)[g], depth_lut(2)[b]
+        return ((r3 << 5) | (g3 << 2) | b2).astype(_np.uint8).tobytes()
+    if kind == "rgb565":
+        r5, g6, b5 = depth_lut(5)[r], depth_lut(6)[g], depth_lut(5)[b]
+        packed = ((r5 << 11) | (g6 << 5) | b5).astype("<u2")
+        return packed.tobytes()
+    # rgb444
+    r4 = depth_lut(4)[r].reshape(h, w)
+    g4 = depth_lut(4)[g].reshape(h, w)
+    b4 = depth_lut(4)[b].reshape(h, w)
+    out = _np.empty((h, w // 2, 3), dtype=_np.uint8)
+    out[:, :, 0] = (r4[:, 0::2] << 4) | g4[:, 0::2]
+    out[:, :, 1] = (b4[:, 0::2] << 4) | r4[:, 1::2]
+    out[:, :, 2] = (g4[:, 1::2] << 4) | b4[:, 1::2]
+    return out.tobytes()
+
+
+def _pack_low_rgb_py(r, g, b, w, h, kind):
+    chunks = []
+    for row in range(h):
+        s = row * w
+        e = s + w
+        rr, gg, bb = r[s:e], g[s:e], b[s:e]
+        if kind == "rgbx32":
+            out = bytearray(w * 4)
+            out[0::4], out[1::4], out[2::4] = rr, gg, bb
+            out[3::4] = b"\xff" * w
+            chunks.append(bytes(out))
+        elif kind == "rgb332":
+            l3, l2 = depth_lut(3), depth_lut(2)
+            chunks.append(bytes((l3[a] << 5) | (l3[c] << 2) | l2[d]
+                                for a, c, d in zip(rr, gg, bb)))
+        elif kind == "rgb565":
+            l5, l6 = depth_lut(5), depth_lut(6)
+            vals = array("H", ((l5[a] << 11) | (l6[c] << 5) | l5[d]
+                               for a, c, d in zip(rr, gg, bb)))
+            chunks.append(_to_bytes(vals, 2))
+        else:  # rgb444
+            l4 = depth_lut(4)
+            out = bytearray(w // 2 * 3)
+            out[0::3] = bytes((l4[a] << 4) | l4[c]
+                              for a, c in zip(rr[0::2], gg[0::2]))
+            out[1::3] = bytes((l4[a] << 4) | l4[c]
+                              for a, c in zip(bb[0::2], rr[1::2]))
+            out[2::3] = bytes((l4[a] << 4) | l4[c]
+                              for a, c in zip(gg[1::2], bb[1::2]))
+            chunks.append(bytes(out))
+    return b"".join(chunks)
 
 
 def _convert_rgb(y, u, v, w, h, tables, bgr):
@@ -760,10 +914,10 @@ class Job(object):
     """파일 하나의 변환 계획."""
 
     __slots__ = ("src", "dst", "fmt", "width", "height", "frames", "options",
-                 "guessed_format", "guessed_size")
+                 "guessed_format", "guessed_size", "out_format")
 
     def __init__(self, src, dst, fmt, width, height, frames, options,
-                 guessed_format=False, guessed_size=False):
+                 guessed_format=False, guessed_size=False, out_format=None):
         self.src = src
         self.dst = dst
         self.fmt = fmt
@@ -773,6 +927,8 @@ class Job(object):
         self.options = options
         self.guessed_format = guessed_format
         self.guessed_size = guessed_size
+        # rgb-same 처럼 입력에 따라 정해지는 값이 있어서 파일마다 따로 둔다
+        self.out_format = out_format or options.out_format
 
 
 class Options(object):
@@ -816,9 +972,14 @@ def plan_job(src, out_dir, options, fmt=None, size=None, plain_name=False):
             fmt = FORMATS["i420"]
             guessed_format = True
 
+    # rgb-same 은 입력의 픽셀당 비트 수를 보고 크기가 같아지는 RGB 를 고른다.
+    out_format = options.out_format
+    if out_format == RGB_SAME:
+        out_format = rgb_same_size_format(fmt)
+
     # copy 모드는 바이트를 그대로 옮기므로 해상도를 몰라도 변환에 지장이 없다.
     # 해상도는 사이드카에 남길 참고 정보로만 쓰고, 못 알아내도 실패시키지 않는다.
-    copy_mode = options.out_format == "copy"
+    copy_mode = out_format == "copy"
 
     guessed_size = False
     if size is None:
@@ -839,6 +1000,11 @@ def plan_job(src, out_dir, options, fmt=None, size=None, plain_name=False):
             width, height = 0, 0        # 참고 정보로도 쓸 수 없는 값
         else:
             validate_geometry(fmt, width, height)
+
+    if width and OUT_FORMATS[out_format][0] == "rgb444" and width % 2:
+        raise ConversionError(
+            "rgb444 는 두 픽셀을 3바이트에 담으므로 가로 해상도가 짝수여야 "
+            "합니다 (현재 %d)." % width)
 
     if width and height:
         fsize = frame_size(fmt, width, height)
@@ -869,27 +1035,30 @@ def plan_job(src, out_dir, options, fmt=None, size=None, plain_name=False):
     if plain_name or not width or copy_mode:
         out_name = "%s.raw" % stem
     else:
-        out_name = "%s_%dx%d_%s.raw" % (stem, width, height, options.out_format)
+        out_name = "%s_%dx%d_%s.raw" % (stem, width, height, out_format)
     dst = os.path.join(out_dir, out_name)
 
     if os.path.abspath(dst) == os.path.abspath(src):
         raise ConversionError("출력 경로가 입력 파일과 같습니다. -o 로 다른 폴더를 지정하세요.")
 
     return Job(src, dst, fmt, width, height, frames, options,
-               guessed_format, guessed_size)
+               guessed_format, guessed_size, out_format)
 
 
 def run_job(job):
     """계획된 변환을 실제로 수행한다. 원본 파일은 읽기 전용으로만 연다."""
     opts = job.options
     fmt = job.fmt
-    kind = OUT_FORMATS[opts.out_format][0]
+    kind = OUT_FORMATS[job.out_format][0]
     matrix = pick_matrix(opts.matrix, job.height)
 
     tables = None
     if kind in ("rgb", "bgr", "gray"):
-        out_bits = OUT_FORMATS[opts.out_format][2]
+        out_bits = OUT_FORMATS[job.out_format][2]
         tables = ColorTables(fmt, out_bits, matrix, opts.color_range)
+    elif kind in ("rgb332", "rgb444", "rgb565", "rgbx32"):
+        # 패킹 포맷은 8비트로 계산한 뒤 채널별로 눌러 담는다
+        tables = ColorTables(fmt, 8, matrix, opts.color_range)
 
     source_bytes = os.path.getsize(job.src)
     if kind == "copy":
@@ -899,7 +1068,7 @@ def run_job(job):
         expected = min(out_fsize * job.frames, source_bytes)
     else:
         in_fsize = frame_size(fmt, job.width, job.height)
-        out_fsize = out_frame_size(opts.out_format, fmt, job.width, job.height)
+        out_fsize = out_frame_size(job.out_format, fmt, job.width, job.height)
         expected = out_fsize * job.frames
 
     out_dir = os.path.dirname(job.dst)
@@ -927,7 +1096,7 @@ def run_job(job):
                     if len(data) != in_fsize:
                         raise ConversionError("프레임을 끝까지 읽지 못했습니다.")
                     out = convert_frame(data, fmt, job.width, job.height,
-                                        opts.out_format, tables, opts.chroma)
+                                        job.out_format, tables, opts.chroma)
                     if len(out) != out_fsize:
                         raise ConversionError(
                             "내부 오류: 출력 프레임 크기가 %d 이어야 하는데 %d 입니다."
@@ -960,7 +1129,7 @@ def run_job(job):
         "height": job.height or None,
         "frames": job.frames if job.width else None,
         "output": os.path.basename(job.dst),
-        "output_format": opts.out_format,
+        "output_format": job.out_format,
         "output_bytes_per_frame": out_fsize,
         "output_bytes": written,
         "size_unchanged": written == source_bytes,
@@ -994,9 +1163,9 @@ def planned_output_bytes(job):
     src_bytes = os.path.getsize(job.src)
     if not job.width:
         return src_bytes
-    total = out_frame_size(job.options.out_format, job.fmt,
+    total = out_frame_size(job.out_format, job.fmt,
                            job.width, job.height) * job.frames
-    if OUT_FORMATS[job.options.out_format][0] == "copy":
+    if OUT_FORMATS[job.out_format][0] == "copy":
         return min(total, src_bytes)
     return total
 
@@ -1076,8 +1245,11 @@ def build_parser():
                    help="입력 해상도. 생략하면 파일 이름과 크기로 자동 판별")
     p.add_argument("--format", metavar="FMT",
                    help="입력 YUV 포맷. 생략하면 파일 이름으로 자동 판별 (기본 추정값: i420)")
-    p.add_argument("--out-format", default="rgb24", choices=sorted(OUT_FORMATS),
-                   metavar="FMT", help="출력 RAW 포맷 (기본: rgb24). --list-formats 참고")
+    p.add_argument("--out-format", default="rgb24",
+                   choices=sorted(OUT_FORMATS) + [RGB_SAME], metavar="FMT",
+                   help="출력 RAW 포맷 (기본: rgb24). 크기를 유지하려면 copy, "
+                        "RGB 로 바꾸면서 크기도 유지하려면 %s. --list-formats 참고"
+                        % RGB_SAME)
     p.add_argument("--matrix", default="auto",
                    choices=["auto", "bt601", "bt709", "bt2020"],
                    help="색변환 행렬 (기본: auto = 720p 이상이면 bt709)")
@@ -1119,7 +1291,17 @@ def print_formats():
     print("  다른 이름(별칭)도 인식합니다: yu12, iyuv, yuy2, y800 ...")
     print("\n출력 RAW 포맷:")
     for name in sorted(OUT_FORMATS):
-        print("  %-9s %s" % (name, OUT_FORMATS[name][3]))
+        mark = " *" if name in SIZE_PRESERVING else "  "
+        print(" %s %-9s %s" % (mark, name, OUT_FORMATS[name][3]))
+    print("  %-11s %s" % (RGB_SAME,
+                          "입력과 크기가 같아지는 RGB 를 자동으로 고름"))
+    print("\n  * 표시는 파일 크기가 입력과 완전히 같은 출력입니다.")
+    print("\n입력 픽셀당 비트 수 -> 크기가 같아지는 RGB (%s 가 고르는 값):" % RGB_SAME)
+    for bits in sorted(RGB_BY_BITS):
+        name = RGB_BY_BITS[bits]
+        note = REDUCED_COLOR.get(name, "색 손실 없음")
+        print("  %2d비트  %-9s %s" % (bits, name, note))
+    print("  예) 4:2:0 8비트 = 12비트/픽셀 -> rgb444")
 
 
 def resolve_jobs(files, args, options):
@@ -1229,6 +1411,10 @@ def main(argv=None):
             notes.append("포맷을 알 수 없어 i420 으로 가정")
         if job.guessed_size:
             notes.append("해상도를 파일 크기로 추정")
+        if job.out_format in REDUCED_COLOR:
+            notes.append("색 단계 줄어듦: %s" % REDUCED_COLOR[job.out_format])
+        if options.out_format == RGB_SAME:
+            notes.append("크기 유지를 위해 %s 선택" % job.out_format)
         if not args.quiet or args.dry_run:
             src_bytes = os.path.getsize(job.src)
             out_total = planned_output_bytes(job)
