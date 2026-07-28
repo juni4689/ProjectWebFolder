@@ -40,7 +40,7 @@ except Exception:  # pragma: no cover - numpy 미설치 환경
 if os.environ.get("YUV2RAW_NO_NUMPY"):
     _np = None
 
-VERSION = "1.1.0"
+VERSION = "1.0.1"
 
 FIX = 16          # 고정소수점 비트 수
 FIX_ONE = 1 << FIX
@@ -741,46 +741,6 @@ def detect_size_from_filesize(fmt, file_size):
         "--size WxH 로 지정해 주세요." % top)
 
 
-#: 프레임당 바이트 수가 (가로 x 세로 x num / den) 인 포맷 묶음.
-#: 같은 크기를 갖는 포맷끼리는 파일 크기만으로 구분할 수 없어서 함께 묶어 보여준다.
-BPP_CLASSES = [
-    ((1, 1), "gray"),
-    ((3, 2), "i420 / nv12 / yv12 / nv21"),
-    ((2, 1), "i422 / yuyv / uyvy / nv16, gray_16"),
-    ((3, 1), "i444 / yv24, i420_10 / p010"),
-    ((4, 1), "i422_10 / p210"),
-    ((6, 1), "i444_10"),
-]
-
-
-def probe_interpretations(file_size, extra_sizes=()):
-    """파일 크기에 딱 맞아떨어지는 (해상도, 포맷 묶음, 프레임 수) 목록.
-
-    헤더가 없는 파일은 해석이 여러 가지 나올 수 있다. 어느 것이 맞는지는
-    파일만 봐서는 알 수 없으므로, 가능한 해석을 모두 보여주고 고르게 한다.
-    """
-    rows = []
-    seen = set()
-    sizes = list(extra_sizes) + [s for s in COMMON_RESOLUTIONS
-                                 if s not in extra_sizes]
-    for w, h in sizes:
-        for (num, den), label in BPP_CLASSES:
-            if den == 2 and (w % 2 or h % 2):
-                continue          # 4:2:0 은 가로 세로 모두 짝수여야 한다
-            if (num, den) == (2, 1) and w % 2:
-                continue          # 4:2:2 는 가로가 짝수여야 한다
-            if (w * h * num) % den:
-                continue
-            fs = w * h * num // den
-            if fs and file_size % fs == 0:
-                key = (w, h, label)
-                if key not in seen:
-                    seen.add(key)
-                    rows.append((w, h, label, file_size // fs))
-    rows.sort(key=lambda r: (r[3], -(r[0] * r[1])))
-    return rows
-
-
 # --------------------------------------------------------------------------
 # 파일 단위 변환
 # --------------------------------------------------------------------------
@@ -793,10 +753,10 @@ class Job(object):
     """파일 하나의 변환 계획."""
 
     __slots__ = ("src", "dst", "fmt", "width", "height", "frames", "options",
-                 "guessed_format", "size_source", "notes")
+                 "guessed_format", "guessed_size")
 
     def __init__(self, src, dst, fmt, width, height, frames, options,
-                 guessed_format=False, size_source="옵션", notes=None):
+                 guessed_format=False, guessed_size=False):
         self.src = src
         self.dst = dst
         self.fmt = fmt
@@ -805,8 +765,7 @@ class Job(object):
         self.frames = frames
         self.options = options
         self.guessed_format = guessed_format
-        self.size_source = size_source
-        self.notes = notes or []
+        self.guessed_size = guessed_size
 
 
 class Options(object):
@@ -827,22 +786,6 @@ class Options(object):
         self.buffer_frames = buffer_frames
 
 
-def geometry_ok(fmt, size):
-    try:
-        validate_geometry(fmt, size[0], size[1])
-    except ValueError:
-        return False
-    return True
-
-
-def fits_exactly(fmt, size, file_size):
-    """이 해상도로 읽었을 때 파일이 프레임 단위로 딱 떨어지는가."""
-    if not geometry_ok(fmt, size):
-        return False
-    fsize = frame_size(fmt, size[0], size[1])
-    return bool(fsize) and file_size % fsize == 0
-
-
 def plan_job(src, out_dir, options, fmt=None, size=None, plain_name=False):
     """파일 하나에 대한 변환 계획을 세운다(실제 변환은 하지 않는다)."""
     base = os.path.basename(src)
@@ -858,35 +801,12 @@ def plan_job(src, out_dir, options, fmt=None, size=None, plain_name=False):
             fmt = FORMATS["i420"]
             guessed_format = True
 
-    notes = []
-    size_source = "옵션"
+    guessed_size = False
     if size is None:
-        name_size = detect_size_from_name(base)
-        if name_size is None:
+        size = detect_size_from_name(base)
+        if size is None:
             size = detect_size_from_filesize(fmt, file_size)
-            size_source = "파일 크기 추정"
-        elif fits_exactly(fmt, name_size, file_size):
-            size = name_size
-            size_source = "파일 이름"
-        else:
-            # 이름의 해상도가 실제 파일 크기와 맞지 않는다. 이름을 그대로 믿는
-            # 대신 파일 크기로 다시 따져본다(이름이 실제와 다른 경우가 흔하다).
-            try:
-                size = detect_size_from_filesize(fmt, file_size)
-            except ValueError:
-                if options.allow_partial and geometry_ok(fmt, name_size):
-                    size = name_size
-                    size_source = "파일 이름"
-                else:
-                    raise ConversionError(
-                        "파일 이름의 해상도 %dx%d 는 파일 크기(%d바이트)와 맞지 "
-                        "않고, 대신 쓸 해상도도 찾지 못했습니다. "
-                        "--size WxH 로 지정하거나 --probe 로 가능한 해석을 "
-                        "확인해 보세요." % (name_size[0], name_size[1], file_size))
-            else:
-                size_source = "파일 크기 추정"
-                notes.append("이름의 해상도 %dx%d 는 파일 크기와 맞지 않아 무시함"
-                             % (name_size[0], name_size[1]))
+            guessed_size = True
     width, height = size
 
     validate_geometry(fmt, width, height)
@@ -919,7 +839,7 @@ def plan_job(src, out_dir, options, fmt=None, size=None, plain_name=False):
         raise ConversionError("출력 경로가 입력 파일과 같습니다. -o 로 다른 폴더를 지정하세요.")
 
     return Job(src, dst, fmt, width, height, frames, options,
-               guessed_format, size_source, notes)
+               guessed_format, guessed_size)
 
 
 def run_job(job):
@@ -983,7 +903,6 @@ def run_job(job):
         "source_bit_depth": fmt.depth,
         "width": job.width,
         "height": job.height,
-        "size_source": job.size_source,
         "frames": job.frames,
         "output": os.path.basename(job.dst),
         "output_format": opts.out_format,
@@ -1117,88 +1036,11 @@ def build_parser():
                    help="동시에 변환할 파일 수 (기본: auto)")
     p.add_argument("--dry-run", action="store_true",
                    help="실제로 변환하지 않고 계획만 출력한다")
-    p.add_argument("--probe", action="store_true",
-                   help="변환하지 않고, 각 파일이 어떤 해상도/포맷으로 읽힐 수 "
-                        "있는지 전부 보여준다 (해상도가 이상할 때 쓰세요)")
     p.add_argument("-q", "--quiet", action="store_true", help="진행 로그를 줄인다")
     p.add_argument("--list-formats", action="store_true",
                    help="지원하는 입출력 포맷을 출력하고 끝낸다")
     p.add_argument("--version", action="version", version="yuv2raw %s" % VERSION)
     return p
-
-
-def display_width(text):
-    """터미널에서 차지하는 칸 수. 한글은 두 칸으로 센다."""
-    import unicodedata
-    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
-               for c in text)
-
-
-def pad_display(text, width):
-    return text + " " * max(0, width - display_width(text))
-
-
-def probe_files(files, args, options):
-    """변환하지 않고, 각 파일이 어떻게 해석될 수 있는지 보여준다.
-
-    헤더가 없는 파일은 같은 바이트열이 여러 해상도로 읽힐 수 있다. 어느 쪽이
-    맞는지는 파일만 봐서는 알 수 없으므로, 도구가 무엇을 골랐는지와 그 근거,
-    그리고 가능한 다른 해석을 함께 보여준다.
-    """
-    explicit_fmt = resolve_format(args.format) if args.format else None
-
-    for src in files:
-        base = os.path.basename(src)
-        file_size = os.path.getsize(src)
-        name_size = detect_size_from_name(base)
-        name_fmt = detect_format_from_name(base)
-        fmt = explicit_fmt or name_fmt or FORMATS["i420"]
-
-        print("%s" % base)
-        print("  파일 크기        : %s 바이트 (%s)"
-              % ("{:,}".format(file_size), human_bytes(file_size)))
-        print("  이름에서 읽은 값 : 해상도 %s, 포맷 %s"
-              % ("%dx%d" % name_size if name_size else "없음",
-                 name_fmt.name if name_fmt else "없음"))
-
-        chosen = None
-        try:
-            job = plan_job(src, os.path.dirname(src), options,
-                           fmt=explicit_fmt, size=args.size)
-        except (ConversionError, ValueError) as exc:
-            print("  지금 선택되는 값 : (없음) %s" % exc)
-        else:
-            # 같은 해상도라도 프레임 크기가 다르면 다른 해석이므로 함께 비교한다
-            chosen = (job.width, job.height,
-                      frame_size(job.fmt, job.width, job.height))
-            print("  지금 선택되는 값 : %dx%d, %s, %d프레임  [%s]"
-                  % (job.width, job.height, job.fmt.name, job.frames,
-                     job.size_source))
-            for note in job.notes:
-                print("                     %s" % note)
-
-        extra = [name_size] if name_size else []
-        if args.size:
-            extra.insert(0, args.size)
-        rows = probe_interpretations(file_size, extra)
-
-        print("  가능한 해석 (프레임 수가 정확히 떨어지는 것만):")
-        if not rows:
-            print("      없음 - 파일이 잘렸거나 흔치 않은 해상도일 수 있습니다.")
-        else:
-            print("      %s %s  %s"
-                  % (pad_display("해상도", 12), pad_display("프레임", 7), "포맷 후보"))
-            for w, h, label, frames in rows[:14]:
-                mark = ">" if chosen == (w, h, file_size // frames) else " "
-                print("   %s  %s %s  %s"
-                      % (mark, pad_display("%dx%d" % (w, h), 12),
-                         pad_display(str(frames), 7), label))
-            if len(rows) > 14:
-                print("      ... 외 %d가지" % (len(rows) - 14))
-        print("  원하는 해석을 --size WxH [--format FMT] 로 지정하세요.")
-        print()
-
-    return 0
 
 
 def print_formats():
@@ -1292,9 +1134,6 @@ def main(argv=None):
         print("변환할 파일이 없습니다. (패턴: %s)" % ", ".join(patterns), file=sys.stderr)
         return 1
 
-    if args.probe:
-        return probe_files(files, args, options)
-
     jobs, failures = resolve_jobs(files, args, options)
 
     skipped = []
@@ -1317,17 +1156,19 @@ def main(argv=None):
         print("-" * 72)
 
     for job in jobs:
-        notes = list(job.notes)
+        notes = []
         if job.guessed_format:
             notes.append("포맷을 알 수 없어 i420 으로 가정")
+        if job.guessed_size:
+            notes.append("해상도를 파일 크기로 추정")
         if not args.quiet or args.dry_run:
             out_total = out_frame_size(options.out_format, job.fmt,
                                        job.width, job.height) * job.frames
             print("  %s -> %s" % (os.path.basename(job.src), os.path.basename(job.dst)))
-            print("      %dx%d %s, %d프레임, 출력 %s  [해상도: %s]%s"
+            print("      %dx%d %s, %d프레임, 출력 %s%s"
                   % (job.width, job.height, job.fmt.name, job.frames,
-                     human_bytes(out_total), job.size_source,
-                     ("  <- %s" % "; ".join(notes)) if notes else ""))
+                     human_bytes(out_total),
+                     (" [%s]" % "; ".join(notes)) if notes else ""))
 
     for job in skipped:
         print("  건너뜀(이미 있음): %s" % os.path.basename(job.dst))
