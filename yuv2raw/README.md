@@ -5,7 +5,7 @@
 
 - 파이썬 3.6 이상만 있으면 동작합니다. 추가 설치 패키지 없음.
 - `numpy` 가 설치돼 있으면 자동으로 빠른 경로를 사용합니다(같은 결과, 약 3배 빠름).
-- 입력 20종 이상 / 출력 13종 지원, 8·10·12·16비트 지원.
+- 입력 20종 이상 / 출력 14종 지원, 8·10·12·16비트 지원.
 
 ---
 
@@ -16,8 +16,8 @@
 `convert_folder.bat` **위로 변환할 폴더를 끌어다 놓으면** 끝입니다.
 (더블클릭한 뒤 폴더 경로를 입력해도 됩니다.)
 
-**흑백 8비트로 변환합니다**(`--out-format gray8`). 색 정보는 넣지 않습니다.
-물어보는 건 해상도 하나뿐입니다.
+**흑백으로 변환하면서 파일 크기를 그대로 유지합니다**(`--out-format gray-same`).
+색 정보는 넣지 않습니다. 물어보는 건 해상도 하나뿐입니다.
 
 ```
 Input resolution as WxH, for example 2560x1440.
@@ -53,22 +53,22 @@ set "DEFAULT_SIZE=2560x1440"
 ### macOS · Linux
 
 ```bash
-./convert_folder.sh /경로/yuv_폴더                  # 흑백 8비트
-./convert_folder.sh /경로/yuv_폴더 gray8 2560x1440  # 해상도까지 지정
-./convert_folder.sh /경로/yuv_폴더 rgb24            # 컬러가 필요할 때
+./convert_folder.sh /경로/yuv_폴더                      # 흑백 + 크기 유지
+./convert_folder.sh /경로/yuv_폴더 gray-same 2560x1440  # 해상도까지 지정
+./convert_folder.sh /경로/yuv_폴더 rgb24                # 컬러가 필요할 때
 ```
 
 ### 명령줄
 
 ```bash
-# 폴더 전체 변환 (기본: 흑백 8비트, 결과는 <폴더>/raw_out)
+# 폴더 전체 변환 (기본: 흑백 + 파일 크기 유지, 결과는 <폴더>/raw_out)
 python yuv2raw.py /경로/yuv_폴더
 
 # 결과를 눈으로 확인 — .raw 옆에 첫 프레임 .png 를 같이 만듭니다
 python yuv2raw.py /경로/yuv_폴더 --preview
 
-# 흑백이면서 파일 크기까지 유지 (4:2:2 입력이면 크기가 정확히 같아짐)
-python yuv2raw.py /경로/yuv_폴더 --out-format gray16le
+# 흑백 8비트로 (크기는 줄어듦)
+python yuv2raw.py /경로/yuv_폴더 --out-format gray8
 
 # 컬러가 필요할 때
 python yuv2raw.py /경로/yuv_폴더 --out-format rgb24
@@ -201,7 +201,9 @@ python yuv2raw.py ./in --size 1920x1080 --format nv12
 |---|---|---|
 | `copy` | 원본 바이트 그대로. 이름만 `.raw` 로 바뀝니다 | **입력과 완전히 동일** |
 | `planar` | Y,U,V 평면 그대로 (NV12 → I420 처럼 순서만 정규화) | **입력과 동일** |
-| `gray8` (기본) | 휘도만 8비트 — **색 없음** | W×H |
+| `gray-same` (기본) | 휘도만 — **색 없음**, 입력에 맞춰 자동 선택 | **입력과 동일** |
+| `gray8` | 휘도만 8비트 | W×H |
+| `gray12p` | 휘도만 12비트, 2픽셀당 3바이트 | W×H×1.5 |
 | `rgb24` | R,G,B 8비트 인터리브 | W×H×3 (4:2:0 기준 **2배**) |
 | `bgr24` | B,G,R 8비트 인터리브 (OpenCV·비트맵 계열) | W×H×3 |
 | `rgb48le` / `bgr48le` | 16비트 리틀엔디안 인터리브 | W×H×6 |
@@ -213,18 +215,27 @@ python yuv2raw.py ./in --size 1920x1080 --format nv12
 | `gray16le` | 휘도만 16비트 | W×H×2 |
 | `yuv444` | 색공간 변환 없이 크로마만 풀어서 Y,U,V 인터리브 | W×H×3 (4:2:0 기준 2배) |
 
-### 흑백으로 뽑으려면 (기본값)
+### 흑백 + 크기 유지: `gray-same` (기본값)
 
-`gray8` 은 휘도만 담습니다. **색 정보는 전혀 들어가지 않습니다.**
+휘도만 담습니다. **색 정보는 전혀 들어가지 않습니다.**
 크로마가 어떤 값이든 결과가 같습니다.
 
-| 출력 | 픽셀당 | 4:2:2 입력(16비트/픽셀) 기준 |
-|---|---|---|
-| `gray8` (기본) | 8비트 | 파일이 절반으로 |
-| `gray16le` | 16비트 | **크기가 정확히 같음** |
+입력의 픽셀당 비트 수에 맞는 흑백 포맷을 골라 **파일 크기를 그대로 유지**합니다.
 
-흑백이면서 크기까지 유지해야 하면 `gray16le` 을 쓰세요
-(4:2:2 입력에 한해 정확히 일치합니다).
+| 입력 | 픽셀당 비트 | 고르는 흑백 | 크기 |
+|---|---|---|---|
+| 흑백 8비트 | 8 | `gray8` | **정확히 동일** |
+| 4:2:0 8비트 (i420, nv12 …) | 12 | `gray12p` | **정확히 동일** |
+| 4:2:2 8비트 (i422, yuyv …) | 16 | `gray16le` | **정확히 동일** |
+| 4:4:4, 10/16비트 | 24 이상 | `gray16le` | 작아짐 (알려줍니다) |
+
+`gray12p` 는 두 픽셀을 3바이트에 담습니다(Mono12p 배치).
+
+```
+b0 = p0[7:0]    b1 = p1[3:0]<<4 | p0[11:8]    b2 = p1[11:4]
+```
+
+픽셀당 8비트로 충분하고 크기가 줄어도 괜찮으면 `--out-format gray8` 을 쓰세요.
 
 ### RGB 로 바꾸면서 크기도 유지하려면: `rgb-same`
 
@@ -303,8 +314,8 @@ python yuv2raw.py [경로 ...] [옵션]
   -o, --output 폴더     출력 폴더 (기본: 입력 폴더 아래 raw_out)
       --size WxH        입력 해상도 (기본: 자동 판별)
       --format FMT      입력 YUV 포맷 (기본: 자동 판별)
-      --out-format FMT  출력 RAW 포맷 (기본: gray8 = 흑백 8비트)
-                        흑백+크기유지: gray16le / 컬러: rgb24, rgb-same
+      --out-format FMT  출력 RAW 포맷 (기본: gray-same = 흑백 + 크기 유지)
+                        흑백 8비트: gray8 / 컬러: rgb24, rgb-same
       --matrix M        색변환 행렬 (기본: auto)
       --range R         limited | full (기본: limited)
       --chroma C        nearest | bilinear (기본: nearest)
@@ -423,5 +434,5 @@ python3 tests/test_yuv2raw.py            # numpy 경로
 YUV2RAW_NO_NUMPY=1 python3 tests/test_yuv2raw.py   # 순수 파이썬 경로
 ```
 
-86개 테스트가 포맷 해석, 색 정확도, 두 백엔드의 바이트 단위 일치,
+93개 테스트가 포맷 해석, 색 정확도, 두 백엔드의 바이트 단위 일치,
 잘린 파일 거부, 크기 보존, RGB 패킹, 내용 기반 판별, 원본 미변경 등을 확인합니다.

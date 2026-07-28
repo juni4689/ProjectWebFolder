@@ -35,7 +35,7 @@ if [ -z "$TARGET" ]; then
     exit 1
 fi
 
-OUTFMT="${2:-gray8}"
+OUTFMT="${2:-gray-same}"
 OPTIONS="--out-format $OUTFMT"
 
 if [ "$OUTFMT" != "copy" ]; then

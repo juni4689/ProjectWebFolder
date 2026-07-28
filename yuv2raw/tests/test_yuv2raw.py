@@ -93,6 +93,8 @@ def convert(mod, data, fmt, w, h, out_format="rgb24", matrix="bt601",
     if kind in ("rgb", "bgr", "gray"):
         tables = mod.ColorTables(fmt, mod.OUT_FORMATS[out_format][2],
                                  matrix, color_range)
+    elif kind == "gray12p":
+        tables = mod.ColorTables(fmt, 12, matrix, color_range)
     elif kind in ("rgb332", "rgb444", "rgb565", "rgbx32"):
         tables = mod.ColorTables(fmt, 8, matrix, color_range)
     return mod.convert_frame(data, fmt, w, h, out_format, tables, chroma)
@@ -609,10 +611,10 @@ class TestContentDetection(unittest.TestCase):
             f.write(bytes(blob))
         out_dir = os.path.join(self.dir, "out")
         self.assertEqual(y2r.main([src_dir, "-o", out_dir, "-q"]), 0)
-        # 이름에 힌트가 없어도 4:2:2 로 판별되고, 기본값대로 흑백이 나온다
-        out = os.path.join(out_dir, "Aaa_320x180_gray8.raw")
+        # 이름에 힌트가 없어도 4:2:2 로 판별되고, 흑백이면서 크기가 유지된다
+        out = os.path.join(out_dir, "Aaa_320x180_gray16le.raw")
         self.assertTrue(os.path.exists(out), os.listdir(out_dir))
-        self.assertEqual(os.path.getsize(out), w * h)
+        self.assertEqual(os.path.getsize(out), len(blob))
 
     def test_grayscale_output_has_no_colour(self):
         # 흑백 출력은 휘도만 담는다. 크로마가 무엇이든 결과가 같아야 한다.
@@ -633,6 +635,93 @@ class TestContentDetection(unittest.TestCase):
         got = y2r.analyze_content(path, len(blob))
         if got is not None:
             self.assertGreater(got[1][0], 0)   # 답을 냈다면 최소한 형식은 맞아야
+
+
+class TestGraySameSize(unittest.TestCase):
+    """흑백으로 바꾸면서 파일 크기도 유지한다."""
+
+    W, H = 16, 16
+
+    def _blob(self, fmt_name, frames=1):
+        fmt = y2r.resolve_format(fmt_name)
+        out = b""
+        for i in range(frames):
+            y, u, v = make_planes(self.W, self.H, fmt, seed=i)
+            out += pack(fmt, self.W, self.H, y, u, v)
+        return fmt, out
+
+    def test_picks_matching_format(self):
+        expect = {"gray": "gray8", "i420": "gray12p", "nv12": "gray12p",
+                  "i422": "gray16le", "yuyv": "gray16le"}
+        for name, out in expect.items():
+            fmt = y2r.resolve_format(name)
+            picked, note = y2r.gray_same_size_format(fmt)
+            self.assertEqual(picked, out, name)
+            self.assertIsNone(note, "%s 는 정확히 맞아야 합니다" % name)
+
+    def test_size_matches_exactly(self):
+        for name in ("gray", "i420", "nv12", "yv12", "i422", "yuyv", "uyvy"):
+            fmt, blob = self._blob(name)
+            picked, _ = y2r.gray_same_size_format(fmt)
+            out = convert(y2r, blob, fmt, self.W, self.H, picked)
+            self.assertEqual(len(out), len(blob),
+                             "%s -> %s 크기가 달라졌습니다" % (name, picked))
+
+    def test_reports_when_it_cannot_match(self):
+        for name in ("i444", "yuv420p10le"):
+            picked, note = y2r.gray_same_size_format(y2r.resolve_format(name))
+            self.assertIsNotNone(note, "%s 는 알려야 합니다" % name)
+            self.assertIn("정확히", note)
+
+    def test_output_has_no_colour(self):
+        # 크로마를 아무 값으로 바꿔도 결과가 같아야 한다
+        w, h = 16, 16
+        fmt = y2r.resolve_format("i420")
+        yy, _, _ = make_planes(w, h, fmt)
+        n = w // 2 * (h // 2)
+        for out_name in ("gray8", "gray12p", "gray16le"):
+            a = convert(y2r, pack(fmt, w, h, yy, [128] * n, [128] * n),
+                        fmt, w, h, out_name)
+            b = convert(y2r, pack(fmt, w, h, yy, [20] * n, [240] * n),
+                        fmt, w, h, out_name)
+            self.assertEqual(a, b, "%s 에 색이 섞였습니다" % out_name)
+
+    def test_gray12p_packing(self):
+        w = h = 4
+        fmt = y2r.resolve_format("i420")
+        white = convert(y2r, solid_i420(w, h, 235, 128, 128), fmt, w, h, "gray12p")
+        self.assertEqual(len(white), w * h * 3 // 2)
+        self.assertEqual(white, b"\xff" * len(white))    # 4095 가 채워진다
+        black = convert(y2r, solid_i420(w, h, 16, 128, 128), fmt, w, h, "gray12p")
+        self.assertEqual(black, b"\x00" * len(black))
+
+    def test_gray12p_values_round_trip(self):
+        w, h = 16, 16
+        fmt = y2r.resolve_format("i420")
+        yy, u, v = make_planes(w, h, fmt)
+        blob = convert(y2r, pack(fmt, w, h, yy, u, v), fmt, w, h, "gray12p")
+        # 12비트 값을 되돌려 gray16le 과 비교한다
+        ref = convert(y2r, pack(fmt, w, h, yy, u, v), fmt, w, h, "gray16le")
+        import struct
+        ref16 = struct.unpack("<%dH" % (w * h), ref)
+        got = []
+        for i in range(0, len(blob), 3):
+            b0, b1, b2 = blob[i], blob[i + 1], blob[i + 2]
+            got.append(((b1 & 0x0F) << 8) | b0)
+            got.append((b2 << 4) | (b1 >> 4))
+        for a, b in zip(got, ref16):
+            self.assertLessEqual(abs(a - (b >> 4)), 1)
+
+    def test_odd_width_rejected(self):
+        d = tempfile.mkdtemp(prefix="yuv2raw_g12_")
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "a.yuv")
+        with open(path, "wb") as f:
+            f.write(b"\x10" * (15 * 8 * 3))
+        opts = y2r.Options(out_format="gray12p")
+        with self.assertRaises(y2r.ConversionError):
+            y2r.plan_job(path, os.path.join(d, "out"), opts,
+                         fmt=y2r.resolve_format("i444"), size=(15, 8))
 
 
 class TestColorCorrectness(unittest.TestCase):
@@ -1076,25 +1165,26 @@ class TestFileConversion(unittest.TestCase):
         self.assertEqual(
             len([n for n in os.listdir(out_dir) if n.endswith(".raw")]), 4)
 
-    def test_default_output_format_is_gray8(self):
-        self._make_yuv("a_16x16_i420.yuv", 16, 16)
+    def test_default_is_grayscale_and_keeps_size(self):
+        src = self._make_yuv("a_16x16_i420.yuv", 16, 16)
         out_dir = os.path.join(self.dir, "out")
         self.assertEqual(y2r.main([self.src_dir, "-o", out_dir, "-q"]), 0)
-        # 기본값은 흑백 8비트. 컬러로 변환하지 않는다.
-        out = os.path.join(out_dir, "a_16x16_i420_16x16_gray8.raw")
+        # 기본값은 gray-same: 4:2:0 은 12비트/픽셀이라 gray12p 가 선택된다
+        out = os.path.join(out_dir, "a_16x16_i420_16x16_gray12p.raw")
         self.assertTrue(os.path.exists(out), os.listdir(out_dir))
-        self.assertEqual(os.path.getsize(out), 16 * 16)
-        self.assertEqual(y2r.Options().out_format, "gray8")
+        self.assertEqual(os.path.getsize(out), os.path.getsize(src))
+        self.assertEqual(y2r.Options().out_format, y2r.GRAY_SAME)
 
     def test_default_is_not_colour(self):
         # 기본 출력에는 색 정보가 들어가면 안 된다
-        self.assertEqual(y2r.OUT_FORMATS[y2r.Options().out_format][0], "gray")
+        for name in y2r.GRAY_BY_BITS.values():
+            self.assertIn(y2r.OUT_FORMATS[name][0], ("gray", "gray12p"), name)
 
     def test_preview_png_is_written(self):
         self._make_yuv("a_16x16_i420.yuv", 16, 16)
         out_dir = os.path.join(self.dir, "out")
         y2r.main([self.src_dir, "-o", out_dir, "-q", "--preview"])
-        png = os.path.join(out_dir, "a_16x16_i420_16x16_gray8.raw.preview.png")
+        png = os.path.join(out_dir, "a_16x16_i420_16x16_gray12p.raw.preview.png")
         self.assertTrue(os.path.exists(png), os.listdir(out_dir))
         with open(png, "rb") as f:
             head = f.read(8)
