@@ -40,7 +40,7 @@ except Exception:  # pragma: no cover - numpy 미설치 환경
 if os.environ.get("YUV2RAW_NO_NUMPY"):
     _np = None
 
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 
 FIX = 16          # 고정소수점 비트 수
 FIX_ONE = 1 << FIX
@@ -225,6 +225,8 @@ OUT_FORMATS = {
     "rgb565le": ("rgb565", 1, 16, "RGB 5-6-5비트 리틀엔디안 (픽셀당 2바이트)"),
     "rgbx32":   ("rgbx32", 4, 8, "RGB 8-8-8비트 + 패딩 1바이트 (픽셀당 4바이트)"),
     "gray8":    ("gray", 1, 8,  "휘도만 8비트"),
+    "gray10le": ("gray", 1, 16, "휘도만 10비트 (16비트 리틀엔디안 컨테이너, 0~1023)"),
+    "gray12le": ("gray", 1, 16, "휘도만 12비트 (16비트 리틀엔디안 컨테이너, 0~4095)"),
     "gray16le": ("gray", 1, 16, "휘도만 16비트 리틀엔디안"),
     "gray12p":  ("gray12p", 0, 12, "휘도만 12비트 패킹 (2픽셀당 3바이트)"),
     "yuv444":   ("yuv444", 3, 0, "Y,U,V 인터리브 (색공간 변환 없음, 원본 비트수 유지)"),
@@ -245,6 +247,19 @@ SIZE_PRESERVING = ("copy", "planar")
 #: 골라 주므로 파일 크기가 그대로 유지된다.
 RGB_SAME = "rgb-same"      # 컬러로 바꾸면서 크기 유지
 GRAY_SAME = "gray-same"    # 흑백으로 바꾸면서 크기 유지
+
+#: 16비트 그릇에 담되 값의 범위는 더 좁은 출력들.
+#: (그릇 크기는 OUT_FORMATS 의 16, 실제 값의 비트 수는 여기 값)
+OUT_VALUE_BITS = {
+    "gray10le": 10,
+    "gray12le": 12,
+}
+
+
+def out_value_bits(out_format):
+    """이 출력이 담는 값의 비트 수."""
+    return OUT_VALUE_BITS.get(out_format, OUT_FORMATS[out_format][2])
+
 
 #: 픽셀당 비트 수 -> 크기가 정확히 같아지는 흑백 포맷
 GRAY_BY_BITS = {
@@ -687,7 +702,9 @@ def _convert_gray(planes, tables):
         return tables.clamp[idx].tobytes()
     ylut, clamp = tables.ylut, tables.clamp
     vals = [clamp[ylut[s] >> FIX] for s in planes.y]
-    return bytes(vals) if tables.out_bits <= 8 else array("H", vals).tobytes()
+    if tables.out_bits <= 8:
+        return bytes(vals)
+    return _to_bytes(array("H", vals), 2)
 
 
 _DEPTH_LUTS = {}
@@ -1166,7 +1183,7 @@ class Options(object):
                  "allow_partial", "max_frames", "sidecar", "buffer_frames",
                  "preview")
 
-    def __init__(self, out_format=GRAY_SAME, matrix="auto", color_range="limited",
+    def __init__(self, out_format="gray10le", matrix="auto", color_range="limited",
                  chroma="nearest", overwrite=False, allow_partial=False,
                  max_frames=0, sidecar=True, buffer_frames=1, preview=False):
         self.out_format = out_format
@@ -1319,8 +1336,8 @@ def run_job(job):
 
     tables = None
     if kind in ("rgb", "bgr", "gray"):
-        out_bits = OUT_FORMATS[job.out_format][2]
-        tables = ColorTables(fmt, out_bits, matrix, opts.color_range)
+        tables = ColorTables(fmt, out_value_bits(job.out_format), matrix,
+                             opts.color_range)
     elif kind == "gray12p":
         tables = ColorTables(fmt, 12, matrix, opts.color_range)
     elif kind in ("rgb332", "rgb444", "rgb565", "rgbx32"):
@@ -1593,12 +1610,12 @@ def build_parser():
                    help="입력 해상도. 생략하면 파일 이름과 크기로 자동 판별")
     p.add_argument("--format", metavar="FMT",
                    help="입력 YUV 포맷. 생략하면 파일 이름으로 자동 판별 (기본 추정값: i420)")
-    p.add_argument("--out-format", default=GRAY_SAME,
+    p.add_argument("--out-format", default="gray10le",
                    choices=sorted(OUT_FORMATS) + [RGB_SAME, GRAY_SAME],
                    metavar="FMT",
-                   help="출력 RAW 포맷 (기본: gray-same = 흑백으로 바꾸면서 "
-                        "파일 크기 유지). 컬러가 필요하면 rgb24 나 rgb-same. "
-                        "--list-formats 참고")
+                   help="출력 RAW 포맷 (기본: gray10le = 흑백 10비트). "
+                        "입력에 맞춰 크기를 유지하려면 gray-same, "
+                        "컬러가 필요하면 rgb24 나 rgb-same. --list-formats 참고")
     p.add_argument("--matrix", default="auto",
                    choices=["auto", "bt601", "bt709", "bt2020"],
                    help="색변환 행렬 (기본: auto = 720p 이상이면 bt709)")

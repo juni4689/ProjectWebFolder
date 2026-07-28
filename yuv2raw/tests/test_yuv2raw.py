@@ -91,7 +91,7 @@ def convert(mod, data, fmt, w, h, out_format="rgb24", matrix="bt601",
     kind = mod.OUT_FORMATS[out_format][0]
     tables = None
     if kind in ("rgb", "bgr", "gray"):
-        tables = mod.ColorTables(fmt, mod.OUT_FORMATS[out_format][2],
+        tables = mod.ColorTables(fmt, mod.out_value_bits(out_format),
                                  matrix, color_range)
     elif kind == "gray12p":
         tables = mod.ColorTables(fmt, 12, matrix, color_range)
@@ -611,8 +611,8 @@ class TestContentDetection(unittest.TestCase):
             f.write(bytes(blob))
         out_dir = os.path.join(self.dir, "out")
         self.assertEqual(y2r.main([src_dir, "-o", out_dir, "-q"]), 0)
-        # 이름에 힌트가 없어도 4:2:2 로 판별되고, 흑백이면서 크기가 유지된다
-        out = os.path.join(out_dir, "Aaa_320x180_gray16le.raw")
+        # 이름에 힌트가 없어도 4:2:2 로 판별되고, 10비트 흑백으로 크기가 유지된다
+        out = os.path.join(out_dir, "Aaa_320x180_gray10le.raw")
         self.assertTrue(os.path.exists(out), os.listdir(out_dir))
         self.assertEqual(os.path.getsize(out), len(blob))
 
@@ -635,6 +635,63 @@ class TestContentDetection(unittest.TestCase):
         got = y2r.analyze_content(path, len(blob))
         if got is not None:
             self.assertGreater(got[1][0], 0)   # 답을 냈다면 최소한 형식은 맞아야
+
+
+class TestTenBitGray(unittest.TestCase):
+    """10비트 흑백 출력."""
+
+    W, H = 16, 16
+
+    def test_black_and_white_levels(self):
+        fmt = y2r.resolve_format("i420")
+        w = h = 4
+        black = convert(y2r, solid_i420(w, h, 16, 128, 128), fmt, w, h, "gray10le")
+        white = convert(y2r, solid_i420(w, h, 235, 128, 128), fmt, w, h, "gray10le")
+        import struct
+        self.assertEqual(set(struct.unpack("<%dH" % (w * h), black)), {0})
+        self.assertEqual(set(struct.unpack("<%dH" % (w * h), white)), {1023})
+
+    def test_never_exceeds_10_bits(self):
+        fmt = y2r.resolve_format("i420")
+        y = list(range(256)) * (self.W * self.H // 256)
+        n = self.W // 2 * (self.H // 2)
+        blob = pack(fmt, self.W, self.H, y, [128] * n, [128] * n)
+        out = convert(y2r, blob, fmt, self.W, self.H, "gray10le")
+        import struct
+        vals = struct.unpack("<%dH" % (self.W * self.H), out)
+        self.assertLessEqual(max(vals), 1023)
+
+    def test_two_bytes_per_pixel_little_endian(self):
+        fmt = y2r.resolve_format("i420")
+        w = h = 4
+        out = convert(y2r, solid_i420(w, h, 235, 128, 128), fmt, w, h, "gray10le")
+        self.assertEqual(len(out), w * h * 2)
+        self.assertEqual(out[0:2], b"\xff\x03")      # 1023 = 0x03FF, LE
+
+    def test_keeps_size_for_422_input(self):
+        for name in ("i422", "yuyv", "uyvy", "nv16"):
+            fmt = y2r.resolve_format(name)
+            y, u, v = make_planes(self.W, self.H, fmt)
+            blob = pack(fmt, self.W, self.H, y, u, v)
+            out = convert(y2r, blob, fmt, self.W, self.H, "gray10le")
+            self.assertEqual(len(out), len(blob), name)
+
+    def test_has_no_colour(self):
+        fmt = y2r.resolve_format("i420")
+        yy, _, _ = make_planes(self.W, self.H, fmt)
+        n = self.W // 2 * (self.H // 2)
+        a = convert(y2r, pack(fmt, self.W, self.H, yy, [128] * n, [128] * n),
+                    fmt, self.W, self.H, "gray10le")
+        b = convert(y2r, pack(fmt, self.W, self.H, yy, [20] * n, [240] * n),
+                    fmt, self.W, self.H, "gray10le")
+        self.assertEqual(a, b)
+
+    def test_12bit_variant(self):
+        fmt = y2r.resolve_format("i420")
+        w = h = 4
+        out = convert(y2r, solid_i420(w, h, 235, 128, 128), fmt, w, h, "gray12le")
+        import struct
+        self.assertEqual(set(struct.unpack("<%dH" % (w * h), out)), {4095})
 
 
 class TestGraySameSize(unittest.TestCase):
@@ -1165,15 +1222,27 @@ class TestFileConversion(unittest.TestCase):
         self.assertEqual(
             len([n for n in os.listdir(out_dir) if n.endswith(".raw")]), 4)
 
-    def test_default_is_grayscale_and_keeps_size(self):
-        src = self._make_yuv("a_16x16_i420.yuv", 16, 16)
+    def test_default_is_10bit_grayscale(self):
+        self._make_yuv("a_16x16_i420.yuv", 16, 16)
         out_dir = os.path.join(self.dir, "out")
         self.assertEqual(y2r.main([self.src_dir, "-o", out_dir, "-q"]), 0)
-        # 기본값은 gray-same: 4:2:0 은 12비트/픽셀이라 gray12p 가 선택된다
-        out = os.path.join(out_dir, "a_16x16_i420_16x16_gray12p.raw")
+        out = os.path.join(out_dir, "a_16x16_i420_16x16_gray10le.raw")
         self.assertTrue(os.path.exists(out), os.listdir(out_dir))
-        self.assertEqual(os.path.getsize(out), os.path.getsize(src))
-        self.assertEqual(y2r.Options().out_format, y2r.GRAY_SAME)
+        self.assertEqual(os.path.getsize(out), 16 * 16 * 2)   # 16비트 그릇
+        self.assertEqual(y2r.Options().out_format, "gray10le")
+        self.assertEqual(y2r.out_value_bits("gray10le"), 10)
+
+    def test_default_values_fit_in_10_bits(self):
+        self._make_yuv("a_16x16_i420.yuv", 16, 16)
+        out_dir = os.path.join(self.dir, "out")
+        y2r.main([self.src_dir, "-o", out_dir, "-q"])
+        import struct
+        with open(os.path.join(out_dir, "a_16x16_i420_16x16_gray10le.raw"),
+                  "rb") as f:
+            data = f.read()
+        vals = struct.unpack("<%dH" % (len(data) // 2), data)
+        self.assertLessEqual(max(vals), 1023)
+        self.assertGreater(max(vals), 512)      # 실제로 10비트 범위를 쓴다
 
     def test_default_is_not_colour(self):
         # 기본 출력에는 색 정보가 들어가면 안 된다
@@ -1184,7 +1253,7 @@ class TestFileConversion(unittest.TestCase):
         self._make_yuv("a_16x16_i420.yuv", 16, 16)
         out_dir = os.path.join(self.dir, "out")
         y2r.main([self.src_dir, "-o", out_dir, "-q", "--preview"])
-        png = os.path.join(out_dir, "a_16x16_i420_16x16_gray12p.raw.preview.png")
+        png = os.path.join(out_dir, "a_16x16_i420_16x16_gray10le.raw.preview.png")
         self.assertTrue(os.path.exists(png), os.listdir(out_dir))
         with open(png, "rb") as f:
             head = f.read(8)

@@ -5,9 +5,10 @@ rem
 rem  Usage 1) Drag a folder onto this file.
 rem  Usage 2) Double-click, then type the folder path.
 rem
-rem  It converts YUV to grayscale while keeping the exact file size
-rem  (--out-format gray-same) and asks only for the resolution.
-rem  Set OUTFMT below to change that (gray8, rgb24, copy, ...).
+rem  It converts YUV to 10-bit grayscale (--out-format gray10le) and
+rem  asks only for the resolution. 10-bit values sit in a 16-bit
+rem  little-endian container, so 4:2:2 input keeps its exact file size.
+rem  Set OUTFMT below to change that (gray8, gray16le, rgb24, copy, ...).
 rem
 rem  Add --preview to EXTRA below to also get a .png of the first frame,
 rem  so you can check the result without any viewer settings.
@@ -24,7 +25,7 @@ rem        so non-ASCII bytes here corrupt line parsing.
 rem  ---------------------------------------------------------------------
 setlocal
 
-set "OUTFMT=gray-same"
+set "OUTFMT=gray10le"
 set "DEFAULT_SIZE="
 set "EXTRA="
 rem  example: set "EXTRA=--preview"
