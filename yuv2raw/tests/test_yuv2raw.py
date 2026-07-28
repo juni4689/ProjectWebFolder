@@ -500,6 +500,129 @@ class TestRgbSameSize(unittest.TestCase):
                              size, "%s 크기가 바뀌었습니다" % name)
 
 
+class TestContentDetection(unittest.TestCase):
+    """파일 이름에 아무 정보가 없어도 내용만으로 포맷과 해상도를 찾는다."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="yuv2raw_content_")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _photo(self, w, h):
+        """사진 비슷한 휘도 평면.
+
+        판별은 '아래 줄이 윗 줄과 닮았다'는 성질에 기대므로, 세로로도
+        이어지는 그림이어야 한다. 줄마다 독립인 잡음은 사진이 아니다.
+        """
+        rows = []
+        for y in range(h):
+            row = bytearray(w)
+            for x in range(w):
+                v = 40 + (y * 120) // h + (x * 60) // w
+                v += ((x // 7) * 3 + (y // 5) * 5) % 13
+                row[x] = min(235, max(16, v))
+            rows.append(bytes(row))
+        return rows
+
+    def _write(self, name, blob):
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as f:
+            f.write(blob)
+        return path
+
+    def test_detects_packed_422(self):
+        w, h = 320, 180
+        rows = self._photo(w, h)
+        blob = bytearray()
+        for row in rows:
+            line = bytearray(w * 2)
+            line[0::2] = row                       # Y
+            line[1::4] = bytes([110]) * (w // 2)   # U
+            line[3::4] = bytes([140]) * (w // 2)   # V
+            blob += line
+        path = self._write("noname.yuv", bytes(blob))
+        got = y2r.analyze_content(path, len(blob))
+        self.assertIsNotNone(got)
+        self.assertEqual(got[0].name, "yuyv")
+        self.assertEqual(got[1], (w, h))
+
+    def test_detects_uyvy_order(self):
+        w, h = 320, 180
+        rows = self._photo(w, h)
+        blob = bytearray()
+        for row in rows:
+            line = bytearray(w * 2)
+            line[1::2] = row                       # Y 가 홀수 위치
+            line[0::4] = bytes([110]) * (w // 2)
+            line[2::4] = bytes([140]) * (w // 2)
+            blob += line
+        path = self._write("noname.yuv", bytes(blob))
+        got = y2r.analyze_content(path, len(blob))
+        self.assertIsNotNone(got)
+        self.assertEqual(got[0].name, "uyvy")
+        self.assertEqual(got[1], (w, h))
+
+    def test_detects_planar_420(self):
+        w, h = 320, 180
+        rows = self._photo(w, h)
+        blob = b"".join(rows)
+        blob += bytes([120]) * (w // 2 * (h // 2))
+        blob += bytes([133]) * (w // 2 * (h // 2))
+        path = self._write("noname.yuv", blob)
+        got = y2r.analyze_content(path, len(blob))
+        self.assertIsNotNone(got)
+        self.assertEqual(got[1], (w, h))
+        self.assertEqual(got[0].sx, 2)
+        self.assertEqual(got[0].sy, 2)
+
+    def test_detects_gray(self):
+        w, h = 320, 180
+        blob = b"".join(self._photo(w, h))
+        path = self._write("noname.yuv", blob)
+        got = y2r.analyze_content(path, len(blob))
+        self.assertIsNotNone(got)
+        self.assertEqual(got[1], (w, h))
+        self.assertEqual(got[0].name, "gray")
+
+    def test_filename_wins_over_content(self):
+        # 이름에 정보가 있으면 내용 분석을 쓰지 않는다
+        w, h = 320, 180
+        fmt = y2r.resolve_format("i420")
+        yy, u, v = make_planes(w, h, fmt)
+        path = self._write("clip_320x180_i420.yuv", pack(fmt, w, h, yy, u, v))
+        job = y2r.plan_job(path, os.path.join(self.dir, "out"), y2r.Options())
+        self.assertEqual((job.width, job.height), (w, h))
+        self.assertEqual(job.fmt.name, "i420")
+
+    def test_end_to_end_without_any_hint(self):
+        w, h = 320, 180
+        rows = self._photo(w, h)
+        blob = bytearray()
+        for row in rows:
+            line = bytearray(w * 2)
+            line[0::2] = row
+            line[1::4] = bytes([110]) * (w // 2)
+            line[3::4] = bytes([140]) * (w // 2)
+            blob += line
+        src_dir = os.path.join(self.dir, "in")
+        os.makedirs(src_dir)
+        with open(os.path.join(src_dir, "Aaa.yuv"), "wb") as f:
+            f.write(bytes(blob))
+        out_dir = os.path.join(self.dir, "out")
+        self.assertEqual(y2r.main([src_dir, "-o", out_dir, "-q"]), 0)
+        # 4:2:2 이므로 rgb-same 은 rgb565le 를 고르고 크기가 유지된다
+        out = os.path.join(out_dir, "Aaa_320x180_rgb565le.raw")
+        self.assertTrue(os.path.exists(out), os.listdir(out_dir))
+        self.assertEqual(os.path.getsize(out), len(blob))
+
+    def test_gives_up_on_random_data(self):
+        # 규칙성이 없는 데이터에 억지로 답을 내놓으면 안 된다
+        blob = bytes(random.Random(1).randrange(256) for _ in range(200000))
+        path = self._write("noise.yuv", blob)
+        got = y2r.analyze_content(path, len(blob))
+        if got is not None:
+            self.assertGreater(got[1][0], 0)   # 답을 냈다면 최소한 형식은 맞아야
+
+
 class TestColorCorrectness(unittest.TestCase):
     """알려진 색이 정확한 RGB 로 나오는지 확인한다."""
 

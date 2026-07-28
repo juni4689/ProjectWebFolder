@@ -40,7 +40,7 @@ except Exception:  # pragma: no cover - numpy 미설치 환경
 if os.environ.get("YUV2RAW_NO_NUMPY"):
     _np = None
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 
 FIX = 16          # 고정소수점 비트 수
 FIX_ONE = 1 << FIX
@@ -873,6 +873,179 @@ def detect_format_from_name(name):
     return None
 
 
+# --------------------------------------------------------------------------
+# 파일 내용으로 포맷과 해상도 알아내기
+#
+# 파일 이름에 아무 정보가 없어도, 바이트 배열의 규칙성만으로 상당 부분을
+# 알아낼 수 있다. 사진은 한 줄 아래 픽셀과 값이 비슷하므로, 줄 길이(stride)
+# 만큼 떨어진 바이트끼리 비교하면 그 지점에서 차이가 뚜렷하게 작아진다.
+# 픽셀당 바이트 수도 같은 방법으로 알 수 있다. 예를 들어 YUYV 는 4바이트마다
+# 같은 성분이 돌아오므로 4바이트 시프트에서 차이가 가장 작다.
+# --------------------------------------------------------------------------
+
+def _mean_abs_diff(buf, shift, samples=4096):
+    """buf 를 shift 만큼 밀어서 겹쳤을 때의 평균 절대 차이."""
+    span = len(buf) - shift
+    if span <= 0:
+        return 255.0
+    if _np is not None:
+        arr = _np.frombuffer(buf, dtype=_np.uint8)
+        step = max(1, span // samples)
+        a = arr[:span:step].astype(_np.int16)
+        b = arr[shift:shift + span:step].astype(_np.int16)
+        return float(_np.mean(_np.abs(a - b)))
+    step = max(1, span // samples)
+    total = count = 0
+    for i in range(0, span, step):
+        total += abs(buf[i] - buf[i + shift])
+        count += 1
+    return total / float(count or 1)
+
+
+def _component_period(buf):
+    """픽셀 성분이 몇 바이트마다 되풀이되는지 추정한다.
+
+    'packed422' 는 YUYV 계열(2바이트/픽셀)을 뜻한다. 판별 근거는 짝수 위치와
+    홀수 위치의 산포 차이다. 평면 포맷이나 흑백이면 두 위치가 모두 휘도라
+    통계가 비슷하지만, YUYV 는 한쪽이 휘도, 다른 쪽이 크로마라 크게 다르다.
+    """
+    _, s_even = _channel_stats(buf, 2, 0)
+    _, s_odd = _channel_stats(buf, 2, 1)
+    hi, lo = max(s_even, s_odd), min(s_even, s_odd)
+    if hi > 2.0 * max(lo, 1.0):
+        # 산포가 큰 쪽이 진짜 그림인지 확인한다. 16비트 샘플의 하위 바이트는
+        # 산포는 크지만 이웃끼리 전혀 닮지 않아서 여기서 갈린다.
+        offset = 0 if s_even >= s_odd else 1
+        image = buf[offset::2]
+        if _mean_abs_diff(image, 1) < 0.5 * hi:
+            return "packed422"
+        return 2
+    d1 = _mean_abs_diff(buf, 1)
+    d3 = _mean_abs_diff(buf, 3)
+    if d1 > 0.001 and d3 < 0.7 * d1:
+        return 3
+    return 1
+
+
+def _channel_stats(buf, period, offset):
+    """주기 안 특정 위치의 평균과 표준편차."""
+    vals = buf[offset::period]
+    if not vals:
+        return 0.0, 0.0
+    if _np is not None:
+        arr = _np.frombuffer(vals, dtype=_np.uint8).astype(float)
+        return float(arr.mean()), float(arr.std())
+    step = max(1, len(vals) // 4096)
+    picked = vals[::step]
+    mean = sum(picked) / float(len(picked))
+    var = sum((v - mean) ** 2 for v in picked) / float(len(picked))
+    return mean, var ** 0.5
+
+
+def _find_stride(buf, file_size, multiple_of, lo=64, hi=1 << 16):
+    """한 줄의 바이트 수를 찾는다.
+
+    줄 수가 정수여야 하므로 파일 크기의 약수만 후보로 본다. 진짜 줄 길이에서는
+    점수가 뾰족하게 낮아진다는 점(바로 옆 시프트보다 확연히 낮음)을 기준으로
+    삼는다. 단순히 점수가 가장 낮은 곳을 고르면, 그림이 완만할 때 아주 짧은
+    시프트가 이기는 문제가 생긴다.
+    """
+    step = max(2, multiple_of)
+    cands = [x for x in range(lo, min(hi, file_size // 4) + 1)
+             if file_size % x == 0 and x % multiple_of == 0]
+    scored = []
+    for cand in cands:
+        base = _mean_abs_diff(buf, cand, 2048)
+        if base < 0.05:
+            continue
+        near = 0.5 * (_mean_abs_diff(buf, cand - step, 1024)
+                      + _mean_abs_diff(buf, cand + step, 1024))
+        scored.append((near / base, cand, base))
+    if len(scored) < 3:
+        return None
+    # 진짜 줄 길이는 두 가지를 동시에 만족한다.
+    #   1) 옆 시프트보다 뚜렷하게 낮다(뾰족함)
+    #   2) 모든 후보 중 차이가 가장 작다
+    # 두 줄, 세 줄 간격은 뾰족하긴 해도 1)의 값이 더 크므로 걸러진다.
+    sharp = [(base, cand) for dip, cand, base in scored if dip >= 1.15]
+    if not sharp:
+        return None
+    best_base, best_cand = min(sharp)
+    bases = sorted(base for _, cand, base in scored)
+    median = bases[len(bases) // 2]
+    if best_base > 0.7 * median:
+        return None                  # 뚜렷한 답이 아니다. 추측하지 않는다.
+    return best_cand
+
+
+def analyze_content(path, file_size, sample_limit=1 << 21):
+    """파일 내용만 보고 (포맷, (가로, 세로)) 를 추정한다. 실패하면 None."""
+    if file_size < 4096:
+        return None
+    with open(path, "rb") as f:
+        buf = f.read(min(file_size, sample_limit))
+
+    period = _component_period(buf)
+
+    if period == "packed422":
+        stride = _find_stride(buf, file_size, 2)
+        if not stride:
+            return None
+        width, rows = stride // 2, file_size // stride
+        if width < 16 or rows < 16:
+            return None
+        # 4바이트 주기 안에서 Y 는 값이 크게 요동치고 크로마는 128 근처에 몰린다
+        std = [_channel_stats(buf, 4, off)[1] for off in range(4)]
+        y_first = (std[0] + std[2]) > (std[1] + std[3])
+        return resolve_format("yuyv" if y_first else "uyvy"), (width, rows)
+
+    if period != 1:
+        return None                  # 16비트 샘플이나 3바이트 인터리브는 다루지 않는다
+
+    stride = _find_stride(buf, file_size, 1)
+    if not stride or stride < 16:
+        return None
+    width, rows = stride, file_size // stride
+
+    # 평면 포맷: Y 뒤에 오는 크로마 영역은 128 근처에 몰려 있다는 점으로 가른다
+    y_mean, y_std = _channel_stats(buf[:min(len(buf), stride * 8)], 1, 0)
+    best = None
+    for name, num, den in (("i420", 3, 2), ("i422", 2, 1), ("i444", 3, 1),
+                           ("gray", 1, 1)):
+        if (rows * den) % num:
+            continue
+        height = rows * den // num
+        if height < 16 or not (0.2 <= width / float(height) <= 5.0):
+            continue
+        fmt = resolve_format(name)
+        if fmt.sx > 1 and width % fmt.sx:
+            continue
+        if fmt.sy > 1 and height % fmt.sy:
+            continue
+        if name == "gray":
+            # 흑백이라면 파일 뒤쪽도 앞쪽과 같은 성질이어야 한다. 평면 YUV 를
+            # 흑백으로 잘못 본 경우에는 뒤쪽(크로마)의 산포가 뚝 떨어진다.
+            cut = len(buf) * 2 // 3
+            h_mean, h_std = _channel_stats(buf[:cut], 1, 0)
+            t_mean, t_std = _channel_stats(buf[cut:], 1, 0)
+            score = (0.3 * abs(t_mean - h_mean) / 128.0
+                     + abs(t_std - h_std) / max(h_std, 1.0))
+        else:
+            start = width * height
+            if start + 4096 > len(buf):
+                continue
+            c_mean, c_std = _channel_stats(buf[start:start + 65536], 1, 0)
+            # 크로마다울수록 점수가 낮다
+            score = abs(c_mean - 128) / 128.0 + c_std / max(y_std, 1.0)
+        if best is None or score < best[0]:
+            best = (score, fmt, (width, height))
+    if best is None:
+        return None
+    if best[1].kind != "gray" and best[0] > 1.2:
+        return None                  # 크로마로 보기 어렵다. 추측하지 않는다.
+    return best[1], best[2]
+
+
 def detect_size_from_filesize(fmt, file_size):
     """파일 크기가 딱 떨어지는 해상도 후보를 찾는다.
 
@@ -951,6 +1124,14 @@ class Options(object):
         self.preview = preview
 
 
+def fits_exactly(fmt, size, file_size):
+    """이 해상도로 읽었을 때 파일이 프레임 단위로 딱 떨어지는가."""
+    if not geometry_ok(fmt, size):
+        return False
+    fsize = frame_size(fmt, size[0], size[1])
+    return bool(fsize) and file_size % fsize == 0
+
+
 def geometry_ok(fmt, size):
     try:
         validate_geometry(fmt, size[0], size[1])
@@ -967,9 +1148,22 @@ def plan_job(src, out_dir, options, fmt=None, size=None, plain_name=False):
     if file_size == 0:
         raise ConversionError("빈 파일입니다.")
 
+    # 우선순위: 옵션 > 파일 이름 > 파일 내용 > 파일 크기
     guessed_format = False
+    from_content = None
+    if fmt is None or size is None:
+        name_fmt = detect_format_from_name(base)
+        name_size = detect_size_from_name(base)
+        if (fmt is None and name_fmt is None) or (size is None and name_size is None):
+            try:
+                from_content = analyze_content(src, file_size)
+            except (OSError, ValueError):
+                from_content = None
+
     if fmt is None:
         fmt = detect_format_from_name(base)
+        if fmt is None and from_content is not None:
+            fmt = from_content[0]
         if fmt is None:
             fmt = FORMATS["i420"]
             guessed_format = True
@@ -986,6 +1180,12 @@ def plan_job(src, out_dir, options, fmt=None, size=None, plain_name=False):
     guessed_size = False
     if size is None:
         size = detect_size_from_name(base)
+        if size is None and from_content is not None:
+            # 내용 분석은 포맷과 해상도를 짝으로 내놓는다. 둘이 어긋나면 쓰지 않는다.
+            cand = from_content[1]
+            if fits_exactly(fmt, cand, file_size):
+                size = cand
+                guessed_size = "content"
         if size is None:
             try:
                 size = detect_size_from_filesize(fmt, file_size)
@@ -1486,7 +1686,9 @@ def main(argv=None):
         notes = []
         if job.guessed_format and job.width:
             notes.append("포맷을 알 수 없어 i420 으로 가정")
-        if job.guessed_size:
+        if job.guessed_size == "content":
+            notes.append("포맷과 해상도를 파일 내용으로 판별")
+        elif job.guessed_size:
             notes.append("해상도를 파일 크기로 추정")
         if job.out_format in REDUCED_COLOR:
             notes.append("색 단계 줄어듦: %s" % REDUCED_COLOR[job.out_format])
