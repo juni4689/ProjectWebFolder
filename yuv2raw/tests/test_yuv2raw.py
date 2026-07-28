@@ -612,7 +612,7 @@ class TestContentDetection(unittest.TestCase):
         out_dir = os.path.join(self.dir, "out")
         self.assertEqual(y2r.main([src_dir, "-o", out_dir, "-q"]), 0)
         # 이름에 힌트가 없어도 4:2:2 로 판별되고, 10비트 흑백으로 크기가 유지된다
-        out = os.path.join(out_dir, "Aaa_320x180_gray10le.raw")
+        out = os.path.join(out_dir, "Aaa_320x180_gray16le.raw")
         self.assertTrue(os.path.exists(out), os.listdir(out_dir))
         self.assertEqual(os.path.getsize(out), len(blob))
 
@@ -692,6 +692,82 @@ class TestTenBitGray(unittest.TestCase):
         out = convert(y2r, solid_i420(w, h, 235, 128, 128), fmt, w, h, "gray12le")
         import struct
         self.assertEqual(set(struct.unpack("<%dH" % (w * h), out)), {4095})
+
+
+class TestTenBitKeepsSize(unittest.TestCase):
+    """10비트 값을 담으면서 파일 크기도 그대로 유지한다."""
+
+    W, H = 32, 16
+
+    def _blob(self, fmt_name):
+        fmt = y2r.resolve_format(fmt_name)
+        y, u, v = make_planes(self.W, self.H, fmt)
+        return fmt, pack(fmt, self.W, self.H, y, u, v)
+
+    def _convert_default(self, fmt, blob):
+        out_name, _ = y2r.gray_same_size_format(fmt)
+        bits, _ = y2r.resolve_value_bits(out_name, 10)
+        tables = y2r.ColorTables(fmt, bits, "bt601", "limited")
+        return out_name, bits, y2r.convert_frame(
+            blob, fmt, self.W, self.H, out_name, tables, "nearest")
+
+    def test_size_kept_with_10bit_values(self):
+        for name in ("i420", "nv12", "yv12", "i422", "yuyv", "uyvy", "nv16"):
+            fmt, blob = self._blob(name)
+            out_name, bits, out = self._convert_default(fmt, blob)
+            self.assertEqual(bits, 10, name)
+            self.assertEqual(len(out), len(blob),
+                             "%s -> %s 크기가 달라졌습니다" % (name, out_name))
+
+    def test_values_stay_within_10_bits(self):
+        import struct
+        fmt = y2r.resolve_format("i422")
+        y = [16 + (i * 219) // (self.W * self.H) for i in range(self.W * self.H)]
+        n = self.W // 2 * self.H
+        blob = pack(fmt, self.W, self.H, y, [128] * n, [128] * n)
+        _, _, out = self._convert_default(fmt, blob)
+        vals = struct.unpack("<%dH" % (self.W * self.H), out)
+        self.assertLessEqual(max(vals), 1023)
+
+    def test_gray12p_container_holds_10bit(self):
+        fmt = y2r.resolve_format("i420")
+        w = h = 4
+        tables = y2r.ColorTables(fmt, 10, "bt601", "limited")
+        out = y2r.convert_frame(solid_i420(w, h, 235, 128, 128), fmt, w, h,
+                                "gray12p", tables, "nearest")
+        self.assertEqual(len(out), w * h * 3 // 2)
+        # 흰색은 1023(0x3FF): b0=0xFF, b1 상위니블=0x3 하위=0x3, b2=0x3F
+        got = []
+        for i in range(0, len(out), 3):
+            b0, b1, b2 = out[i], out[i + 1], out[i + 2]
+            got.append(((b1 & 0x0F) << 8) | b0)
+            got.append((b2 << 4) | (b1 >> 4))
+        self.assertEqual(set(got), {1023})
+
+    def test_capacity_is_reported_when_too_small(self):
+        bits, note = y2r.resolve_value_bits("gray8", 10)
+        self.assertEqual(bits, 8)
+        self.assertIsNotNone(note)
+        bits, note = y2r.resolve_value_bits("gray12p", 10)
+        self.assertEqual((bits, note), (10, None))
+        bits, note = y2r.resolve_value_bits("gray16le", 16)
+        self.assertEqual((bits, note), (16, None))
+
+    def test_value_bits_option_end_to_end(self):
+        import struct
+        d = tempfile.mkdtemp(prefix="yuv2raw_vb_")
+        self.addCleanup(shutil.rmtree, d, True)
+        src_dir = os.path.join(d, "in")
+        os.makedirs(src_dir)
+        fmt, blob = self._blob("i422")
+        with open(os.path.join(src_dir, "a_32x16_i422.yuv"), "wb") as f:
+            f.write(blob)
+        out_dir = os.path.join(d, "out")
+        y2r.main([src_dir, "-o", out_dir, "-q", "--value-bits", "16"])
+        with open(os.path.join(out_dir, "a_32x16_i422_32x16_gray16le.raw"),
+                  "rb") as f:
+            vals = struct.unpack("<%dH" % (self.W * self.H), f.read())
+        self.assertGreater(max(vals), 1023)      # 16비트로 요청하면 넓게 쓴다
 
 
 class TestGraySameSize(unittest.TestCase):
@@ -1222,27 +1298,34 @@ class TestFileConversion(unittest.TestCase):
         self.assertEqual(
             len([n for n in os.listdir(out_dir) if n.endswith(".raw")]), 4)
 
-    def test_default_is_10bit_grayscale(self):
-        self._make_yuv("a_16x16_i420.yuv", 16, 16)
+    def test_default_is_10bit_gray_and_keeps_size(self):
+        src = self._make_yuv("a_16x16_i420.yuv", 16, 16)
         out_dir = os.path.join(self.dir, "out")
         self.assertEqual(y2r.main([self.src_dir, "-o", out_dir, "-q"]), 0)
-        out = os.path.join(out_dir, "a_16x16_i420_16x16_gray10le.raw")
+        # 4:2:0 은 12비트/픽셀이라 gray12p 그릇에 10비트 값이 들어간다
+        out = os.path.join(out_dir, "a_16x16_i420_16x16_gray12p.raw")
         self.assertTrue(os.path.exists(out), os.listdir(out_dir))
-        self.assertEqual(os.path.getsize(out), 16 * 16 * 2)   # 16비트 그릇
-        self.assertEqual(y2r.Options().out_format, "gray10le")
-        self.assertEqual(y2r.out_value_bits("gray10le"), 10)
+        self.assertEqual(os.path.getsize(out), os.path.getsize(src))
+        self.assertEqual(y2r.Options().out_format, y2r.GRAY_SAME)
+        self.assertEqual(y2r.Options().value_bits, 10)
 
     def test_default_values_fit_in_10_bits(self):
-        self._make_yuv("a_16x16_i420.yuv", 16, 16)
+        w = h = 16
+        fmt = y2r.resolve_format("i422")           # 16비트 그릇을 쓰는 입력
+        y, u, v = make_planes(w, h, fmt)
+        path = os.path.join(self.src_dir, "b_16x16_i422.yuv")
+        with open(path, "wb") as f:
+            f.write(pack(fmt, w, h, y, u, v))
         out_dir = os.path.join(self.dir, "out")
         y2r.main([self.src_dir, "-o", out_dir, "-q"])
+        out = os.path.join(out_dir, "b_16x16_i422_16x16_gray16le.raw")
+        self.assertEqual(os.path.getsize(out), os.path.getsize(path))
         import struct
-        with open(os.path.join(out_dir, "a_16x16_i420_16x16_gray10le.raw"),
-                  "rb") as f:
+        with open(out, "rb") as f:
             data = f.read()
         vals = struct.unpack("<%dH" % (len(data) // 2), data)
         self.assertLessEqual(max(vals), 1023)
-        self.assertGreater(max(vals), 512)      # 실제로 10비트 범위를 쓴다
+        self.assertGreater(max(vals), 512)
 
     def test_default_is_not_colour(self):
         # 기본 출력에는 색 정보가 들어가면 안 된다
@@ -1253,7 +1336,7 @@ class TestFileConversion(unittest.TestCase):
         self._make_yuv("a_16x16_i420.yuv", 16, 16)
         out_dir = os.path.join(self.dir, "out")
         y2r.main([self.src_dir, "-o", out_dir, "-q", "--preview"])
-        png = os.path.join(out_dir, "a_16x16_i420_16x16_gray10le.raw.preview.png")
+        png = os.path.join(out_dir, "a_16x16_i420_16x16_gray12p.raw.preview.png")
         self.assertTrue(os.path.exists(png), os.listdir(out_dir))
         with open(png, "rb") as f:
             head = f.read(8)

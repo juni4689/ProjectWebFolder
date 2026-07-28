@@ -5,10 +5,11 @@ rem
 rem  Usage 1) Drag a folder onto this file.
 rem  Usage 2) Double-click, then type the folder path.
 rem
-rem  It converts YUV to 10-bit grayscale (--out-format gray10le) and
-rem  asks only for the resolution. 10-bit values sit in a 16-bit
-rem  little-endian container, so 4:2:2 input keeps its exact file size.
-rem  Set OUTFMT below to change that (gray8, gray16le, rgb24, copy, ...).
+rem  It converts YUV to 10-bit grayscale and keeps the exact file size
+rem  (--out-format gray-same --value-bits 10), asking only for the
+rem  resolution. 4:2:0 input uses a 12-bit packed container, 4:2:2 uses a
+rem  16-bit little-endian one; both match the input size exactly.
+rem  Set OUTFMT / VALUEBITS below to change that.
 rem
 rem  Add --preview to EXTRA below to also get a .png of the first frame,
 rem  so you can check the result without any viewer settings.
@@ -25,7 +26,8 @@ rem        so non-ASCII bytes here corrupt line parsing.
 rem  ---------------------------------------------------------------------
 setlocal
 
-set "OUTFMT=gray10le"
+set "OUTFMT=gray-same"
+set "VALUEBITS=10"
 set "DEFAULT_SIZE="
 set "EXTRA="
 rem  example: set "EXTRA=--preview"
@@ -58,7 +60,7 @@ if not defined TARGET (
 rem strip a trailing backslash so the quoted path cannot escape its quote
 if "%TARGET:~-1%"=="\" set "TARGET=%TARGET:~0,-1%"
 
-set "OPTIONS=--out-format %OUTFMT%"
+set "OPTIONS=--out-format %OUTFMT% --value-bits %VALUEBITS%"
 
 echo.
 set "SIZE=%DEFAULT_SIZE%"

@@ -40,7 +40,7 @@ except Exception:  # pragma: no cover - numpy 미설치 환경
 if os.environ.get("YUV2RAW_NO_NUMPY"):
     _np = None
 
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 
 FIX = 16          # 고정소수점 비트 수
 FIX_ONE = 1 << FIX
@@ -257,8 +257,36 @@ OUT_VALUE_BITS = {
 
 
 def out_value_bits(out_format):
-    """이 출력이 담는 값의 비트 수."""
+    """이 출력이 기본으로 담는 값의 비트 수."""
     return OUT_VALUE_BITS.get(out_format, OUT_FORMATS[out_format][2])
+
+
+#: 각 흑백 출력의 그릇이 담을 수 있는 최대 비트 수
+GRAY_CAPACITY = {
+    "gray8": 8,
+    "gray12p": 12,
+    "gray10le": 16,
+    "gray12le": 16,
+    "gray16le": 16,
+}
+
+
+def resolve_value_bits(out_format, requested):
+    """실제로 쓸 값의 비트 수와, 요청과 달라졌을 때의 사유.
+
+    --value-bits 를 주지 않으면(None) gray-same 은 10비트, 나머지는 포맷
+    이름이 뜻하는 비트 수를 쓴다. 그릇보다 큰 값을 요구하면 그릇 크기로
+    낮추고 이유를 알린다.
+    """
+    capacity = GRAY_CAPACITY.get(out_format)
+    if capacity is None:
+        return out_value_bits(out_format), None
+    if requested is None:
+        return out_value_bits(out_format), None
+    if requested > capacity:
+        return capacity, ("%s 는 픽셀당 %d비트까지만 담을 수 있어 %d비트로 "
+                          "낮췄습니다" % (out_format, capacity, capacity))
+    return requested, None
 
 
 #: 픽셀당 비트 수 -> 크기가 정확히 같아지는 흑백 포맷
@@ -1160,7 +1188,7 @@ class Job(object):
 
     __slots__ = ("src", "dst", "fmt", "width", "height", "frames", "options",
                  "guessed_format", "guessed_size", "out_format",
-                 "size_note")
+                 "size_note", "value_bits")
 
     def __init__(self, src, dst, fmt, width, height, frames, options,
                  guessed_format=False, guessed_size=False, out_format=None):
@@ -1176,16 +1204,18 @@ class Job(object):
         # rgb-same 처럼 입력에 따라 정해지는 값이 있어서 파일마다 따로 둔다
         self.out_format = out_format or options.out_format
         self.size_note = None
+        self.value_bits = None
 
 
 class Options(object):
     __slots__ = ("out_format", "matrix", "color_range", "chroma", "overwrite",
                  "allow_partial", "max_frames", "sidecar", "buffer_frames",
-                 "preview")
+                 "preview", "value_bits")
 
-    def __init__(self, out_format="gray10le", matrix="auto", color_range="limited",
+    def __init__(self, out_format=GRAY_SAME, matrix="auto", color_range="limited",
                  chroma="nearest", overwrite=False, allow_partial=False,
-                 max_frames=0, sidecar=True, buffer_frames=1, preview=False):
+                 max_frames=0, sidecar=True, buffer_frames=1, preview=False,
+                 value_bits=10):
         self.out_format = out_format
         self.matrix = matrix
         self.color_range = color_range
@@ -1196,6 +1226,7 @@ class Options(object):
         self.sidecar = sidecar
         self.buffer_frames = buffer_frames
         self.preview = preview
+        self.value_bits = value_bits
 
 
 def fits_exactly(fmt, size, file_size):
@@ -1324,6 +1355,11 @@ def plan_job(src, out_dir, options, fmt=None, size=None, plain_name=False):
     job = Job(src, dst, fmt, width, height, frames, options,
               guessed_format, guessed_size, out_format)
     job.size_note = size_note
+    bits, bits_note = resolve_value_bits(out_format, options.value_bits)
+    job.value_bits = bits
+    if bits_note:
+        job.size_note = ((job.size_note + "; " + bits_note) if job.size_note
+                         else bits_note)
     return job
 
 
@@ -1336,10 +1372,10 @@ def run_job(job):
 
     tables = None
     if kind in ("rgb", "bgr", "gray"):
-        tables = ColorTables(fmt, out_value_bits(job.out_format), matrix,
-                             opts.color_range)
+        tables = ColorTables(fmt, job.value_bits or out_value_bits(job.out_format),
+                             matrix, opts.color_range)
     elif kind == "gray12p":
-        tables = ColorTables(fmt, 12, matrix, opts.color_range)
+        tables = ColorTables(fmt, job.value_bits or 12, matrix, opts.color_range)
     elif kind in ("rgb332", "rgb444", "rgb565", "rgbx32"):
         # 패킹 포맷은 8비트로 계산한 뒤 채널별로 눌러 담는다
         tables = ColorTables(fmt, 8, matrix, opts.color_range)
@@ -1421,6 +1457,7 @@ def run_job(job):
         "frames": job.frames if job.width else None,
         "output": os.path.basename(job.dst),
         "output_format": job.out_format,
+        "output_value_bits": job.value_bits,
         "output_bytes_per_frame": out_fsize,
         "output_bytes": written,
         "size_unchanged": written == source_bytes,
@@ -1610,12 +1647,12 @@ def build_parser():
                    help="입력 해상도. 생략하면 파일 이름과 크기로 자동 판별")
     p.add_argument("--format", metavar="FMT",
                    help="입력 YUV 포맷. 생략하면 파일 이름으로 자동 판별 (기본 추정값: i420)")
-    p.add_argument("--out-format", default="gray10le",
+    p.add_argument("--out-format", default=GRAY_SAME,
                    choices=sorted(OUT_FORMATS) + [RGB_SAME, GRAY_SAME],
                    metavar="FMT",
-                   help="출력 RAW 포맷 (기본: gray10le = 흑백 10비트). "
-                        "입력에 맞춰 크기를 유지하려면 gray-same, "
-                        "컬러가 필요하면 rgb24 나 rgb-same. --list-formats 참고")
+                   help="출력 RAW 포맷 (기본: gray-same = 흑백으로 바꾸면서 "
+                        "파일 크기 유지). 컬러가 필요하면 rgb24 나 rgb-same. "
+                        "--list-formats 참고")
     p.add_argument("--matrix", default="auto",
                    choices=["auto", "bt601", "bt709", "bt2020"],
                    help="색변환 행렬 (기본: auto = 720p 이상이면 bt709)")
@@ -1640,6 +1677,10 @@ def build_parser():
                    help="출력 정보를 담은 .json 사이드카를 만들지 않는다")
     p.add_argument("-j", "--jobs", default="auto", metavar="N",
                    help="동시에 변환할 파일 수 (기본: auto)")
+    p.add_argument("--value-bits", type=int, default=10, metavar="N",
+                   choices=[8, 10, 12, 16],
+                   help="흑백 출력에 담을 값의 비트 수 (기본: 10). 그릇이 더 "
+                        "작으면 그릇 크기로 낮추고 알려준다")
     p.add_argument("--preview", action="store_true",
                    help="변환 결과 첫 프레임을 PNG 로도 저장한다. 뷰어 설정과 "
                         "무관하게 결과를 눈으로 확인할 수 있다")
@@ -1742,7 +1783,7 @@ def main(argv=None):
         color_range=args.color_range, chroma=args.chroma,
         overwrite=args.overwrite, allow_partial=args.allow_partial,
         max_frames=max(0, args.frames), sidecar=not args.no_sidecar,
-        preview=args.preview)
+        preview=args.preview, value_bits=args.value_bits)
 
     patterns = [p.strip() for p in args.pattern.split(",") if p.strip()]
 
@@ -1791,6 +1832,8 @@ def main(argv=None):
             notes.append("크기 유지를 위해 %s 선택" % job.out_format)
         if job.size_note:
             notes.append(job.size_note)
+        if job.value_bits and OUT_FORMATS[job.out_format][0] in ("gray", "gray12p"):
+            notes.append("값 %d비트" % job.value_bits)
         if not args.quiet or args.dry_run:
             src_bytes = os.path.getsize(job.src)
             out_total = planned_output_bytes(job)

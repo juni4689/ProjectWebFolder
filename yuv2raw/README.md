@@ -16,9 +16,9 @@
 `convert_folder.bat` **위로 변환할 폴더를 끌어다 놓으면** 끝입니다.
 (더블클릭한 뒤 폴더 경로를 입력해도 됩니다.)
 
-**10비트 흑백으로 변환합니다**(`--out-format gray10le`). 색 정보는 넣지 않습니다.
-10비트 값이 16비트 리틀엔디안 그릇에 담기므로, 4:2:2 입력은 파일 크기도 그대로입니다.
-물어보는 건 해상도 하나뿐입니다.
+**10비트 흑백으로 변환하면서 파일 크기를 그대로 유지합니다.**
+(`--out-format gray-same --value-bits 10`)
+색 정보는 넣지 않습니다. 물어보는 건 해상도 하나뿐입니다.
 
 ```
 Input resolution as WxH, for example 2560x1440.
@@ -54,15 +54,15 @@ set "DEFAULT_SIZE=2560x1440"
 ### macOS · Linux
 
 ```bash
-./convert_folder.sh /경로/yuv_폴더                     # 10비트 흑백
-./convert_folder.sh /경로/yuv_폴더 gray10le 2560x1440  # 해상도까지 지정
-./convert_folder.sh /경로/yuv_폴더 gray-same           # 크기 유지 우선
+./convert_folder.sh /경로/yuv_폴더                      # 10비트 흑백 + 크기 유지
+./convert_folder.sh /경로/yuv_폴더 gray-same 2560x1440  # 해상도까지 지정
+./convert_folder.sh /경로/yuv_폴더 rgb24                # 컬러가 필요할 때
 ```
 
 ### 명령줄
 
 ```bash
-# 폴더 전체 변환 (기본: 10비트 흑백, 결과는 <폴더>/raw_out)
+# 폴더 전체 변환 (기본: 10비트 흑백 + 크기 유지, 결과는 <폴더>/raw_out)
 python yuv2raw.py /경로/yuv_폴더
 
 # 결과를 눈으로 확인 — .raw 옆에 첫 프레임 .png 를 같이 만듭니다
@@ -205,7 +205,8 @@ python yuv2raw.py ./in --size 1920x1080 --format nv12
 |---|---|---|
 | `copy` | 원본 바이트 그대로. 이름만 `.raw` 로 바뀝니다 | **입력과 완전히 동일** |
 | `planar` | Y,U,V 평면 그대로 (NV12 → I420 처럼 순서만 정규화) | **입력과 동일** |
-| `gray10le` (기본) | 휘도만 10비트 — **색 없음** | W×H×2 |
+| `gray-same` (기본) | 휘도만 — **색 없음**, 그릇을 입력에 맞춰 자동 선택 | **입력과 동일** |
+| `gray10le` | 휘도만 10비트 | W×H×2 |
 | `gray12le` | 휘도만 12비트 | W×H×2 |
 | `gray-same` | 휘도만, 입력에 맞춰 자동 선택 | **입력과 동일** |
 | `gray8` | 휘도만 8비트 | W×H |
@@ -221,7 +222,30 @@ python yuv2raw.py ./in --size 1920x1080 --format nv12
 | `gray16le` | 휘도만 16비트 | W×H×2 |
 | `yuv444` | 색공간 변환 없이 크로마만 풀어서 Y,U,V 인터리브 | W×H×3 (4:2:0 기준 2배) |
 
-### 10비트 흑백: `gray10le` (기본값)
+### 10비트 흑백 + 크기 유지 (기본값)
+
+기본값은 `--out-format gray-same --value-bits 10` 입니다.
+**값은 10비트(0~1023), 파일 크기는 입력 그대로**입니다.
+
+담는 그릇은 입력의 픽셀당 비트 수에 맞춰 고릅니다.
+
+| 입력 | 비트/픽셀 | 그릇 | 값 | 크기 |
+|---|---|---|---|---|
+| 4:2:0 (i420, nv12) | 12 | `gray12p` (2픽셀당 3바이트) | 10비트 | **동일** |
+| 4:2:2 (i422, yuyv) | 16 | `gray16le` (픽셀당 2바이트) | 10비트 | **동일** |
+| 흑백 8비트 | 8 | `gray8` | 8비트 | **동일** (10비트를 담을 수 없어 알려줍니다) |
+| 4:4:4 · 10비트 이상 | 24+ | `gray16le` | 10비트 | 작아짐 (알려줍니다) |
+
+`--value-bits` 로 값의 범위만 따로 바꿀 수 있습니다(8·10·12·16).
+그릇보다 큰 값을 요구하면 그릇 크기로 낮추고 이유를 알려줍니다.
+
+```bash
+python yuv2raw.py ./in                      # 10비트 (기본)
+python yuv2raw.py ./in --value-bits 12      # 12비트
+python yuv2raw.py ./in --value-bits 16      # 16비트 전 범위
+```
+
+### 비트 수를 직접 고르려면: `gray10le` 등
 
 휘도만 **10비트(0~1023)** 로 담고, 값은 **16비트 리틀엔디안** 그릇에 넣습니다.
 픽셀당 2바이트이므로 **4:2:2 입력(픽셀당 16비트)은 파일 크기가 그대로**입니다.
@@ -338,8 +362,9 @@ python yuv2raw.py [경로 ...] [옵션]
   -o, --output 폴더     출력 폴더 (기본: 입력 폴더 아래 raw_out)
       --size WxH        입력 해상도 (기본: 자동 판별)
       --format FMT      입력 YUV 포맷 (기본: 자동 판별)
-      --out-format FMT  출력 RAW 포맷 (기본: gray10le = 10비트 흑백)
-                        크기 유지 우선: gray-same / 컬러: rgb24, rgb-same
+      --out-format FMT  출력 RAW 포맷 (기본: gray-same = 흑백 + 크기 유지)
+                        컬러: rgb24, rgb-same
+      --value-bits N    흑백 값의 비트 수 8|10|12|16 (기본: 10)
       --matrix M        색변환 행렬 (기본: auto)
       --range R         limited | full (기본: limited)
       --chroma C        nearest | bilinear (기본: nearest)
@@ -458,5 +483,5 @@ python3 tests/test_yuv2raw.py            # numpy 경로
 YUV2RAW_NO_NUMPY=1 python3 tests/test_yuv2raw.py   # 순수 파이썬 경로
 ```
 
-100개 테스트가 포맷 해석, 색 정확도, 두 백엔드의 바이트 단위 일치,
+105개 테스트가 포맷 해석, 색 정확도, 두 백엔드의 바이트 단위 일치,
 잘린 파일 거부, 크기 보존, RGB 패킹, 내용 기반 판별, 원본 미변경 등을 확인합니다.

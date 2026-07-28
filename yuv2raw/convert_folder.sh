@@ -35,8 +35,8 @@ if [ -z "$TARGET" ]; then
     exit 1
 fi
 
-OUTFMT="${2:-gray10le}"
-OPTIONS="--out-format $OUTFMT"
+OUTFMT="${2:-gray-same}"
+OPTIONS="--out-format $OUTFMT --value-bits 10"
 
 if [ "$OUTFMT" != "copy" ]; then
     SIZE="$3"
