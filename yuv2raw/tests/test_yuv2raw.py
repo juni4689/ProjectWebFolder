@@ -178,6 +178,100 @@ class TestDetection(unittest.TestCase):
             y2r.detect_size_from_filesize(fmt, size)
 
 
+class TestProbe(unittest.TestCase):
+    """헤더 없는 파일의 해석 후보 목록."""
+
+    def test_lists_true_interpretation(self):
+        # 2560x1440 i420 3프레임 분량
+        size = 2560 * 1440 * 3 // 2 * 3
+        rows = y2r.probe_interpretations(size)
+        found = [(w, h, f) for w, h, label, f in rows
+                 if (w, h) == (2560, 1440) and label.startswith("i420")]
+        self.assertEqual(found, [(2560, 1440, 3)])
+
+    def test_lists_ambiguous_alternative(self):
+        # 같은 바이트 수가 2560x2160 i420 2프레임으로도 읽힌다
+        size = 2560 * 1440 * 3 // 2 * 3
+        rows = y2r.probe_interpretations(size, extra_sizes=[(2560, 2160)])
+        alt = [(w, h, f) for w, h, label, f in rows
+               if (w, h) == (2560, 2160) and label.startswith("i420")]
+        self.assertEqual(alt, [(2560, 2160, 2)])
+
+    def test_rows_are_exact_divisors_only(self):
+        size = 1920 * 1080 * 3 // 2 * 7
+        for w, h, label, frames in y2r.probe_interpretations(size):
+            self.assertEqual(size % frames, 0)
+            self.assertGreater(frames, 0)
+
+    def test_odd_geometry_excluded_for_420(self):
+        rows = y2r.probe_interpretations(999 * 999)
+        for w, h, label, frames in rows:
+            if label.startswith("i420"):
+                self.assertEqual((w % 2, h % 2), (0, 0))
+
+
+class TestSizeSource(unittest.TestCase):
+    """해상도를 어디서 얻었는지, 이름이 틀렸을 때 어떻게 되는지."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="yuv2raw_size_")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _sparse(self, name, size):
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as f:
+            f.truncate(size)
+        return path
+
+    def test_size_from_name(self):
+        path = self._sparse("a_1920x1080.yuv", 1920 * 1080 * 3 // 2 * 2)
+        job = y2r.plan_job(path, self.dir + "/out", y2r.Options())
+        self.assertEqual((job.width, job.height, job.frames), (1920, 1080, 2))
+        self.assertEqual(job.size_source, "파일 이름")
+        self.assertEqual(job.notes, [])
+
+    def test_size_from_option_wins(self):
+        path = self._sparse("a_1920x1080.yuv", 1280 * 720 * 3 // 2)
+        job = y2r.plan_job(path, self.dir + "/out", y2r.Options(),
+                           size=(1280, 720))
+        self.assertEqual((job.width, job.height), (1280, 720))
+        self.assertEqual(job.size_source, "옵션")
+
+    def test_size_from_filesize(self):
+        path = self._sparse("noname.yuv", 1920 * 1080 * 3 // 2)
+        job = y2r.plan_job(path, self.dir + "/out", y2r.Options())
+        self.assertEqual((job.width, job.height), (1920, 1080))
+        self.assertEqual(job.size_source, "파일 크기 추정")
+
+    def test_wrong_name_size_falls_back_to_filesize(self):
+        # 이름은 2560x2160 이지만 실제 내용은 2560x1440 한 프레임
+        path = self._sparse("cap_2560x2160.yuv", 2560 * 1440 * 3 // 2)
+        job = y2r.plan_job(path, self.dir + "/out", y2r.Options())
+        self.assertEqual((job.width, job.height), (2560, 1440))
+        self.assertEqual(job.size_source, "파일 크기 추정")
+        self.assertTrue(any("2560x2160" in n for n in job.notes), job.notes)
+
+    def test_wrong_name_size_with_no_fallback_errors(self):
+        path = self._sparse("cap_1920x1080.yuv", 1920 * 1080 * 3 // 2 + 7)
+        with self.assertRaises(y2r.ConversionError) as ctx:
+            y2r.plan_job(path, self.dir + "/out", y2r.Options())
+        self.assertIn("--probe", str(ctx.exception))
+
+    def test_explicit_size_mismatch_still_errors(self):
+        # 옵션으로 준 해상도는 절대 무시하지 않는다
+        path = self._sparse("a.yuv", 1920 * 1080 * 3 // 2 + 5)
+        with self.assertRaises(y2r.ConversionError):
+            y2r.plan_job(path, self.dir + "/out", y2r.Options(),
+                         size=(1920, 1080))
+
+    def test_probe_writes_nothing(self):
+        self._sparse("cap_2560x2160.yuv", 2560 * 1440 * 3 // 2 * 3)
+        before = sorted(os.listdir(self.dir))
+        rc = y2r.main([self.dir, "--probe"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(sorted(os.listdir(self.dir)), before)
+
+
 class TestColorCorrectness(unittest.TestCase):
     """알려진 색이 정확한 RGB 로 나오는지 확인한다."""
 
