@@ -40,7 +40,7 @@ except Exception:  # pragma: no cover - numpy 미설치 환경
 if os.environ.get("YUV2RAW_NO_NUMPY"):
     _np = None
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 FIX = 16          # 고정소수점 비트 수
 FIX_ONE = 1 << FIX
@@ -215,6 +215,7 @@ def validate_geometry(fmt, width, height):
 
 #: 이름 -> (채널 수, 출력 비트수, 종류)
 OUT_FORMATS = {
+    "copy":     ("copy", 1, 8, "원본 바이트 그대로 (파일 크기가 1바이트도 안 바뀜)"),
     "rgb24":    ("rgb", 3, 8,  "RGB 인터리브 8비트"),
     "bgr24":    ("bgr", 3, 8,  "BGR 인터리브 8비트"),
     "rgb48le":  ("rgb", 3, 16, "RGB 인터리브 16비트 리틀엔디안"),
@@ -232,9 +233,13 @@ MATRICES = {
 }
 
 
+#: 프레임당 바이트 수가 입력과 완전히 같은 출력 포맷(= 파일 크기가 안 바뀜)
+SIZE_PRESERVING = ("copy", "planar")
+
+
 def out_frame_size(out_format, fmt, width, height):
     kind, nch, bits, _ = OUT_FORMATS[out_format]
-    if kind == "planar":
+    if kind in ("planar", "copy"):
         return frame_size(fmt, width, height)
     if kind == "yuv444":
         return width * height * 3 * fmt.bytes_per_sample
@@ -527,6 +532,8 @@ def _upsample_py(plane, cw, ch, w, h, sx, sy, method, bps):
 def convert_frame(data, fmt, width, height, out_format, tables, chroma_method):
     """한 프레임 바이트열을 목표 RAW 포맷 바이트열로 변환한다."""
     kind = OUT_FORMATS[out_format][0]
+    if kind == "copy":
+        return data          # 손대지 않는다. 들어온 바이트가 그대로 나간다.
     planes = unpack_frame(data, fmt, width, height)
 
     if kind == "planar":
@@ -786,6 +793,14 @@ class Options(object):
         self.buffer_frames = buffer_frames
 
 
+def geometry_ok(fmt, size):
+    try:
+        validate_geometry(fmt, size[0], size[1])
+    except ValueError:
+        return False
+    return True
+
+
 def plan_job(src, out_dir, options, fmt=None, size=None, plain_name=False):
     """파일 하나에 대한 변환 계획을 세운다(실제 변환은 하지 않는다)."""
     base = os.path.basename(src)
@@ -801,17 +816,38 @@ def plan_job(src, out_dir, options, fmt=None, size=None, plain_name=False):
             fmt = FORMATS["i420"]
             guessed_format = True
 
+    # copy 모드는 바이트를 그대로 옮기므로 해상도를 몰라도 변환에 지장이 없다.
+    # 해상도는 사이드카에 남길 참고 정보로만 쓰고, 못 알아내도 실패시키지 않는다.
+    copy_mode = options.out_format == "copy"
+
     guessed_size = False
     if size is None:
         size = detect_size_from_name(base)
         if size is None:
-            size = detect_size_from_filesize(fmt, file_size)
-            guessed_size = True
+            try:
+                size = detect_size_from_filesize(fmt, file_size)
+                guessed_size = True
+            except ValueError:
+                if not copy_mode:
+                    raise
+                size = (0, 0)
+
     width, height = size
 
-    validate_geometry(fmt, width, height)
-    fsize = frame_size(fmt, width, height)
-    frames, remainder = divmod(file_size, fsize)
+    if width and height:
+        if copy_mode and not geometry_ok(fmt, size):
+            width, height = 0, 0        # 참고 정보로도 쓸 수 없는 값
+        else:
+            validate_geometry(fmt, width, height)
+
+    if width and height:
+        fsize = frame_size(fmt, width, height)
+        frames, remainder = divmod(file_size, fsize)
+        if remainder and copy_mode:
+            # 바이트 복사에는 영향이 없다. 해상도 정보만 못 믿는 것으로 처리한다.
+            width, height, frames, remainder = 0, 0, 1, 0
+    else:
+        fsize, frames, remainder = file_size, 1, 0
 
     if remainder:
         if not options.allow_partial:
@@ -826,10 +862,11 @@ def plan_job(src, out_dir, options, fmt=None, size=None, plain_name=False):
                 % (fsize, file_size))
     if frames == 0:
         raise ConversionError("변환할 프레임이 없습니다.")
-    if options.max_frames:
+    if options.max_frames and width:
         frames = min(frames, options.max_frames)
 
-    if plain_name:
+    # copy 모드에서는 해상도를 검증하지 않으므로 파일 이름에 적어 넣지 않는다.
+    if plain_name or not width or copy_mode:
         out_name = "%s.raw" % stem
     else:
         out_name = "%s_%dx%d_%s.raw" % (stem, width, height, options.out_format)
@@ -854,9 +891,16 @@ def run_job(job):
         out_bits = OUT_FORMATS[opts.out_format][2]
         tables = ColorTables(fmt, out_bits, matrix, opts.color_range)
 
-    in_fsize = frame_size(fmt, job.width, job.height)
-    out_fsize = out_frame_size(opts.out_format, fmt, job.width, job.height)
-    expected = out_fsize * job.frames
+    source_bytes = os.path.getsize(job.src)
+    if kind == "copy":
+        # 해상도를 알든 모르든 바이트를 그대로 옮긴다.
+        in_fsize = out_fsize = (frame_size(fmt, job.width, job.height)
+                                if job.width else source_bytes)
+        expected = min(out_fsize * job.frames, source_bytes)
+    else:
+        in_fsize = frame_size(fmt, job.width, job.height)
+        out_fsize = out_frame_size(opts.out_format, fmt, job.width, job.height)
+        expected = out_fsize * job.frames
 
     out_dir = os.path.dirname(job.dst)
     if out_dir:
@@ -867,18 +911,29 @@ def run_job(job):
     written = 0
     try:
         with open(job.src, "rb") as fin, open(tmp, "wb") as fout:
-            for _ in range(job.frames):
-                data = fin.read(in_fsize)
-                if len(data) != in_fsize:
-                    raise ConversionError("프레임을 끝까지 읽지 못했습니다.")
-                out = convert_frame(data, fmt, job.width, job.height,
-                                    opts.out_format, tables, opts.chroma)
-                if len(out) != out_fsize:
-                    raise ConversionError(
-                        "내부 오류: 출력 프레임 크기가 %d 이어야 하는데 %d 입니다."
-                        % (out_fsize, len(out)))
-                fout.write(out)
-                written += len(out)
+            if kind == "copy":
+                # 큰 파일도 메모리에 다 올리지 않도록 조각내어 옮긴다.
+                remaining = expected
+                while remaining > 0:
+                    chunk = fin.read(min(1 << 20, remaining))
+                    if not chunk:
+                        raise ConversionError("원본을 끝까지 읽지 못했습니다.")
+                    fout.write(chunk)
+                    written += len(chunk)
+                    remaining -= len(chunk)
+            else:
+                for _ in range(job.frames):
+                    data = fin.read(in_fsize)
+                    if len(data) != in_fsize:
+                        raise ConversionError("프레임을 끝까지 읽지 못했습니다.")
+                    out = convert_frame(data, fmt, job.width, job.height,
+                                        opts.out_format, tables, opts.chroma)
+                    if len(out) != out_fsize:
+                        raise ConversionError(
+                            "내부 오류: 출력 프레임 크기가 %d 이어야 하는데 %d 입니다."
+                            % (out_fsize, len(out)))
+                    fout.write(out)
+                    written += len(out)
             fout.flush()
             os.fsync(fout.fileno())
 
@@ -898,16 +953,17 @@ def run_job(job):
         "tool": "yuv2raw %s" % VERSION,
         "created": datetime.now(timezone.utc).astimezone().isoformat(),
         "source": os.path.basename(job.src),
-        "source_bytes": os.path.getsize(job.src),
-        "source_format": fmt.name,
-        "source_bit_depth": fmt.depth,
-        "width": job.width,
-        "height": job.height,
-        "frames": job.frames,
+        "source_bytes": source_bytes,
+        "source_format": fmt.name if kind != "copy" else None,
+        "source_bit_depth": fmt.depth if kind != "copy" else None,
+        "width": job.width or None,
+        "height": job.height or None,
+        "frames": job.frames if job.width else None,
         "output": os.path.basename(job.dst),
         "output_format": opts.out_format,
         "output_bytes_per_frame": out_fsize,
         "output_bytes": written,
+        "size_unchanged": written == source_bytes,
         "matrix": matrix if tables is not None else None,
         "range": opts.color_range if tables is not None else None,
         "chroma_upsample": opts.chroma if fmt.sx * fmt.sy > 1 else None,
@@ -932,6 +988,18 @@ def _worker(payload):
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
+
+def planned_output_bytes(job):
+    """이 계획대로 변환하면 출력 파일이 몇 바이트가 되는지."""
+    src_bytes = os.path.getsize(job.src)
+    if not job.width:
+        return src_bytes
+    total = out_frame_size(job.options.out_format, job.fmt,
+                           job.width, job.height) * job.frames
+    if OUT_FORMATS[job.options.out_format][0] == "copy":
+        return min(total, src_bytes)
+    return total
+
 
 def collect_inputs(paths, patterns, recursive):
     """입력 경로(파일/폴더) 목록에서 변환 대상 파일을 모은다."""
@@ -1157,17 +1225,22 @@ def main(argv=None):
 
     for job in jobs:
         notes = []
-        if job.guessed_format:
+        if job.guessed_format and job.width:
             notes.append("포맷을 알 수 없어 i420 으로 가정")
         if job.guessed_size:
             notes.append("해상도를 파일 크기로 추정")
         if not args.quiet or args.dry_run:
-            out_total = out_frame_size(options.out_format, job.fmt,
-                                       job.width, job.height) * job.frames
+            src_bytes = os.path.getsize(job.src)
+            out_total = planned_output_bytes(job)
+            if job.width:
+                geom = "%dx%d %s, %d프레임" % (job.width, job.height,
+                                              job.fmt.name, job.frames)
+            else:
+                geom = "해상도 확인 안 함 (바이트를 그대로 옮김)"
             print("  %s -> %s" % (os.path.basename(job.src), os.path.basename(job.dst)))
-            print("      %dx%d %s, %d프레임, 출력 %s%s"
-                  % (job.width, job.height, job.fmt.name, job.frames,
-                     human_bytes(out_total),
+            print("      %s, 입력 %s -> 출력 %s%s%s"
+                  % (geom, human_bytes(src_bytes), human_bytes(out_total),
+                     "  (크기 동일)" if out_total == src_bytes else "",
                      (" [%s]" % "; ".join(notes)) if notes else ""))
 
     for job in skipped:

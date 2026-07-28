@@ -178,6 +178,139 @@ class TestDetection(unittest.TestCase):
             y2r.detect_size_from_filesize(fmt, size)
 
 
+class TestSizePreserving(unittest.TestCase):
+    """copy 모드는 파일 크기가 1바이트도 바뀌지 않아야 한다."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="yuv2raw_copy_")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.src_dir = os.path.join(self.dir, "in")
+        self.out_dir = os.path.join(self.dir, "out")
+        os.makedirs(self.src_dir)
+
+    def _write(self, name, data):
+        path = os.path.join(self.src_dir, name)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    def _outputs(self):
+        return sorted(n for n in os.listdir(self.out_dir) if n.endswith(".raw"))
+
+    def test_bytes_are_identical(self):
+        payloads = {}
+        for name, fmt_name, w, h, frames in (
+                ("a_16x16_i420.yuv", "i420", 16, 16, 2),
+                ("b_32x16_nv12.yuv", "nv12", 32, 16, 1),
+                ("c_16x16_yuyv.yuv", "yuyv", 16, 16, 3),
+                ("d_16x16_i444.yuv", "i444", 16, 16, 1)):
+            fmt = y2r.resolve_format(fmt_name)
+            blob = b""
+            for i in range(frames):
+                y, u, v = make_planes(w, h, fmt, seed=i)
+                blob += pack(fmt, w, h, y, u, v)
+            payloads[name] = blob
+            self._write(name, blob)
+
+        rc = y2r.main([self.src_dir, "-o", self.out_dir, "-q",
+                       "--out-format", "copy"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self._outputs()), 4)
+
+        for name, blob in payloads.items():
+            out = os.path.join(self.out_dir, os.path.splitext(name)[0] + ".raw")
+            self.assertTrue(os.path.exists(out), out)
+            with open(out, "rb") as f:
+                self.assertEqual(f.read(), blob, "%s 의 바이트가 달라졌습니다" % name)
+
+    def test_each_file_keeps_its_own_size(self):
+        # 파일마다 크기가 달라도 각자의 크기가 그대로 유지되어야 한다
+        sizes = {}
+        for name, n in (("a.yuv", 1234567), ("b.yuv", 99), ("c.yuv", 5000000)):
+            sizes[name] = n
+            self._write(name, os.urandom(64) * (n // 64) + b"\x00" * (n % 64))
+
+        y2r.main([self.src_dir, "-o", self.out_dir, "-q", "--out-format", "copy"])
+        for name, n in sizes.items():
+            out = os.path.join(self.out_dir, os.path.splitext(name)[0] + ".raw")
+            self.assertEqual(os.path.getsize(out), n)
+
+    def test_works_without_any_resolution_info(self):
+        # 어떤 해상도에도 맞지 않는 크기 - rgb24 는 실패하고 copy 는 성공한다
+        self._write("weird.yuv", b"\x77" * 1234567)
+        self.assertEqual(
+            y2r.main([self.src_dir, "-o", self.out_dir, "-q"]), 1)
+        self.assertEqual(
+            y2r.main([self.src_dir, "-o", self.out_dir, "-q",
+                      "--out-format", "copy"]), 0)
+        self.assertEqual(os.path.getsize(os.path.join(self.out_dir, "weird.raw")),
+                         1234567)
+
+    def test_wrong_name_resolution_does_not_matter(self):
+        # 이름은 2560x2160 이지만 실제는 2560x1440 3프레임
+        blob = b"\x55" * (2560 * 1440 * 3 // 2 * 3)
+        self._write("cap_2560x2160.yuv", blob)
+        rc = y2r.main([self.src_dir, "-o", self.out_dir, "-q",
+                       "--out-format", "copy"])
+        self.assertEqual(rc, 0)
+        out = os.path.join(self.out_dir, "cap_2560x2160.raw")
+        self.assertEqual(os.path.getsize(out), len(blob))
+
+    def test_output_name_has_no_unverified_resolution(self):
+        self._write("cap_2560x2160.yuv", b"\x55" * (2560 * 1440 * 3 // 2 * 3))
+        y2r.main([self.src_dir, "-o", self.out_dir, "-q", "--out-format", "copy"])
+        self.assertEqual(self._outputs(), ["cap_2560x2160.raw"])
+
+    def test_sidecar_marks_size_unchanged(self):
+        blob = b"\x11" * (16 * 16 * 3 // 2)
+        self._write("a_16x16_i420.yuv", blob)
+        y2r.main([self.src_dir, "-o", self.out_dir, "-q", "--out-format", "copy"])
+        with open(os.path.join(self.out_dir, "a_16x16_i420.raw.json"),
+                  encoding="utf-8") as f:
+            info = json.load(f)
+        self.assertTrue(info["size_unchanged"])
+        self.assertEqual(info["source_bytes"], info["output_bytes"])
+
+    def test_frame_limit_still_works(self):
+        fmt = y2r.resolve_format("i420")
+        one = b""
+        y, u, v = make_planes(16, 16, fmt)
+        one = pack(fmt, 16, 16, y, u, v)
+        self._write("a_16x16_i420.yuv", one * 4)
+        y2r.main([self.src_dir, "-o", self.out_dir, "-q",
+                  "--out-format", "copy", "--frames", "2"])
+        out = os.path.join(self.out_dir, "a_16x16_i420.raw")
+        self.assertEqual(os.path.getsize(out), len(one) * 2)
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), one * 2)
+
+    def test_planar_output_also_preserves_size(self):
+        fmt = y2r.resolve_format("nv12")
+        y, u, v = make_planes(32, 16, fmt)
+        blob = pack(fmt, 32, 16, y, u, v)
+        self._write("a_32x16_nv12.yuv", blob)
+        y2r.main([self.src_dir, "-o", self.out_dir, "-q",
+                  "--out-format", "planar"])
+        out = os.path.join(self.out_dir, "a_32x16_nv12_32x16_planar.raw")
+        self.assertEqual(os.path.getsize(out), len(blob))
+
+    def test_size_preserving_list_is_accurate(self):
+        fmt = y2r.resolve_format("i420")
+        w = h = 16
+        src = y2r.frame_size(fmt, w, h)
+        for name in y2r.OUT_FORMATS:
+            same = y2r.out_frame_size(name, fmt, w, h) == src
+            self.assertEqual(same, name in y2r.SIZE_PRESERVING,
+                             "%s 의 크기 보존 여부가 목록과 다릅니다" % name)
+
+    def test_source_is_untouched(self):
+        blob = b"\x42" * 4096
+        path = self._write("a.yuv", blob)
+        y2r.main([self.src_dir, "-o", self.out_dir, "-q", "--out-format", "copy"])
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), blob)
+
+
 class TestColorCorrectness(unittest.TestCase):
     """알려진 색이 정확한 RGB 로 나오는지 확인한다."""
 

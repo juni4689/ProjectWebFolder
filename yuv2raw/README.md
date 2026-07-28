@@ -16,20 +16,22 @@
 `convert_folder.bat` **위로 변환할 폴더를 끌어다 놓으면** 끝입니다.
 (더블클릭한 뒤 폴더 경로를 입력해도 됩니다.)
 
-실행하면 **해상도를 물어봅니다.**
+실행하면 **출력 방식을 물어봅니다.**
 
 ```
-Input resolution as WxH, for example 2560x1440.
-Press Enter to detect it from the file name and size.
-Resolution: 2560x1440
+Output type:
+  1) same size - keep every byte and the exact file size (default)
+  2) RGB24     - convert YUV to RGB; the file becomes 2x larger
+Choice [1]:
 ```
 
-- `2560x1440` 처럼 입력하면 **그 해상도로 변환합니다.** 파일 이름이 뭐라고 되어 있든
-  입력한 값이 우선합니다.
-- 그냥 **Enter** 를 치면 파일 이름과 크기로 자동 판별합니다.
+- **1번(기본)** — 바이트를 그대로 옮깁니다. **파일 크기가 1바이트도 바뀌지 않습니다.**
+  해상도를 몰라도 되고, 물어보지도 않습니다.
+- **2번** — RGB24 로 변환합니다. 이때만 해상도를 물어봅니다.
+  입력한 값은 파일 이름보다 우선하고, Enter 를 치면 자동 판별합니다.
 
 매번 같은 해상도를 쓴다면 `convert_folder.bat` 을 메모장으로 열어
-`set "DEFAULT_SIZE="` 줄을 이렇게 고쳐 두세요. 그러면 Enter 만 쳐도 이 값이 쓰입니다.
+`set "DEFAULT_SIZE="` 줄을 이렇게 고쳐 두세요.
 
 ```bat
 set "DEFAULT_SIZE=2560x1440"
@@ -49,8 +51,9 @@ set "DEFAULT_SIZE=2560x1440"
 ### macOS · Linux
 
 ```bash
-./convert_folder.sh /경로/yuv_폴더             # 해상도를 물어봄
-./convert_folder.sh /경로/yuv_폴더 2560x1440   # 해상도를 바로 지정
+./convert_folder.sh /경로/yuv_폴더                  # 물어보면서 진행
+./convert_folder.sh /경로/yuv_폴더 copy             # 크기 그대로
+./convert_folder.sh /경로/yuv_폴더 rgb24 2560x1440  # RGB24 + 해상도 지정
 ```
 
 ### 명령줄
@@ -58,6 +61,9 @@ set "DEFAULT_SIZE=2560x1440"
 ```bash
 # 폴더 전체를 RGB24 raw 로 변환 (결과: <폴더>/raw_out)
 python yuv2raw.py /경로/yuv_폴더
+
+# 파일 크기를 그대로 두고 .raw 로만 (해상도 몰라도 됨)
+python yuv2raw.py /경로/yuv_폴더 --out-format copy
 
 # 해상도를 직접 지정 (파일 이름보다 우선)
 python yuv2raw.py /경로/yuv_폴더 --size 2560x1440
@@ -166,17 +172,35 @@ python yuv2raw.py ./in --size 1920x1080 --format nv12
 
 ## 5. 출력 포맷 (`--out-format`)
 
-| 이름 | 내용 | 프레임당 크기 |
+| 이름 | 내용 | 파일 크기 |
 |---|---|---|
-| `rgb24` (기본) | R,G,B 8비트 인터리브 | W×H×3 |
+| `copy` | 원본 바이트 그대로. 이름만 `.raw` 로 바뀝니다 | **입력과 완전히 동일** |
+| `planar` | Y,U,V 평면 그대로 (NV12 → I420 처럼 순서만 정규화) | **입력과 동일** |
+| `rgb24` (기본) | R,G,B 8비트 인터리브 | W×H×3 (4:2:0 기준 **2배**) |
 | `bgr24` | B,G,R 8비트 인터리브 (OpenCV·비트맵 계열) | W×H×3 |
 | `rgb48le` / `bgr48le` | 16비트 리틀엔디안 인터리브 | W×H×6 |
 | `gray8` / `gray16le` | 휘도만 | W×H (×2) |
-| `yuv444` | 색공간 변환 없이 크로마만 풀어서 Y,U,V 인터리브 | W×H×3 (원본 비트수 유지) |
-| `planar` | Y,U,V 평면 그대로 (NV12 → I420 처럼 정규화만) | 입력과 동일 |
+| `yuv444` | 색공간 변환 없이 크로마만 풀어서 Y,U,V 인터리브 | W×H×3 (4:2:0 기준 2배) |
 
-- **화질 손실이 전혀 없어야 한다면** `--out-format yuv444` 또는 `planar` 을 쓰세요.
-  이 둘은 색공간 변환을 하지 않고 샘플 값을 그대로 옮깁니다.
+### 파일 크기를 그대로 두려면
+
+**`--out-format copy`** 를 쓰세요. 바이트를 하나도 건드리지 않고 옮기므로
+입력과 출력의 크기·해시가 완전히 같습니다. 해상도를 몰라도 되고,
+파일 이름의 해상도가 실제와 달라도 상관없습니다.
+
+```bash
+python yuv2raw.py ./in --out-format copy
+```
+
+`planar` 도 크기는 같지만 NV12 를 I420 순서로 바꾸는 등 **평면 순서를 정리**합니다.
+바이트를 정말 그대로 두고 싶으면 `copy`, 평면 순서를 표준으로 맞추고 싶으면 `planar` 입니다.
+
+나머지 포맷(`rgb24`, `bgr24`, `yuv444` …)은 픽셀당 바이트 수가 달라지므로
+**파일 크기가 반드시 바뀝니다.** 4:2:0 입력을 RGB24 로 바꾸면 정확히 2배가 됩니다
+(픽셀당 1.5바이트 → 3바이트). 이건 포맷의 성질이라 피할 수 없습니다.
+
+- **화질 손실이 전혀 없어야 한다면** `copy`, `planar`, `yuv444` 중에서 고르세요.
+  셋 다 색공간 변환을 하지 않고 샘플 값을 그대로 옮깁니다.
 - `rgb24`/`bgr24` 는 YUV→RGB 변환이 들어가므로 되돌릴 수 없는 반올림이 생깁니다
   (일반적인 이미지 도구에서 바로 열어 보려면 이쪽이 편합니다).
 
@@ -203,7 +227,7 @@ python yuv2raw.py [경로 ...] [옵션]
   -o, --output 폴더     출력 폴더 (기본: 입력 폴더 아래 raw_out)
       --size WxH        입력 해상도 (기본: 자동 판별)
       --format FMT      입력 YUV 포맷 (기본: 자동 판별)
-      --out-format FMT  출력 RAW 포맷 (기본: rgb24)
+      --out-format FMT  출력 RAW 포맷 (기본: rgb24, 크기 유지는 copy)
       --matrix M        색변환 행렬 (기본: auto)
       --range R         limited | full (기본: limited)
       --chroma C        nearest | bilinear (기본: nearest)
@@ -263,6 +287,8 @@ python yuv2raw.py ./in --frames 1
 |---|---|
 | `파일 크기가 프레임 크기의 배수가 아닙니다` | 해상도나 포맷이 실제와 다릅니다. `--size` / `--format` 을 확인하세요. 끝이 잘린 파일이 확실하면 `--allow-partial`. |
 | `해상도 후보가 여러 개라 자동 판별할 수 없습니다` | `--size 1920x1080` 처럼 직접 지정하세요. |
+| 변환하면 파일 크기가 2배가 됨 | RGB24 는 픽셀당 3바이트라 4:2:0(1.5바이트) 대비 항상 2배입니다. 크기를 유지하려면 `--out-format copy`. |
+| 파일마다 크기가 다른데 출력은 다 같은 크기 | `--size` 를 준 상태라 모든 파일을 같은 해상도로 읽고 있습니다. `--size` 를 빼거나 `--out-format copy` 를 쓰세요. |
 | 해상도가 실제와 다르게 나옴 | 파일 이름의 해상도를 쓴 것입니다. `--size` 로 지정하거나, `convert_folder.bat` 실행 시 해상도를 입력하세요. |
 | `가로 해상도가 2의 배수여야 합니다` | 4:2:0/4:2:2 는 짝수 해상도만 가능합니다. 해상도를 다시 확인하세요. |
 | 색이 뒤바뀜 (빨강↔파랑) | 입력이 `nv21`/`yv12` 인데 `nv12`/`i420` 로 읽었을 가능성. `--format` 을 바꿔 보세요. |
@@ -280,5 +306,5 @@ python3 tests/test_yuv2raw.py            # numpy 경로
 YUV2RAW_NO_NUMPY=1 python3 tests/test_yuv2raw.py   # 순수 파이썬 경로
 ```
 
-50개 테스트가 포맷 해석, 색 정확도, 두 백엔드의 바이트 단위 일치,
-잘린 파일 거부, 원본 미변경 등을 확인합니다.
+60개 테스트가 포맷 해석, 색 정확도, 두 백엔드의 바이트 단위 일치,
+잘린 파일 거부, 크기 보존, 원본 미변경 등을 확인합니다.

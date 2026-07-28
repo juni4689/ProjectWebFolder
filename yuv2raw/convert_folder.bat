@@ -5,15 +5,15 @@ rem
 rem  Usage 1) Drag a folder onto this file.
 rem  Usage 2) Double-click, then type the folder path.
 rem
-rem  It asks for the input resolution before converting. Type it as WxH
-rem  (for example 2560x1440), or press Enter to let the tool work it out
-rem  from the file name and size.
+rem  It asks two things:
+rem    1. output type - keep the file size, or convert to RGB24
+rem    2. resolution  - only when you pick RGB24
 rem
 rem  Output goes to <folder>\raw_out. Source files are never modified.
 rem
 rem  To fix a resolution so you do not have to type it every time, put it
 rem  in DEFAULT_SIZE below, e.g.  set "DEFAULT_SIZE=2560x1440"
-rem  For other settings (input format, output format, ...) edit OPTIONS.
+rem  EXTRA is appended to every run if you need other options.
 rem
 rem  NOTE: keep this file ASCII-only with CRLF line endings.
 rem        cmd.exe reads .bat files in the console codepage (949 in Korea),
@@ -22,7 +22,7 @@ rem  ---------------------------------------------------------------------
 setlocal
 
 set "DEFAULT_SIZE="
-set "OPTIONS=--out-format rgb24"
+set "EXTRA="
 
 set "SCRIPT=%~dp0yuv2raw.py"
 if not exist "%SCRIPT%" (
@@ -53,6 +53,19 @@ rem strip a trailing backslash so the quoted path cannot escape its quote
 if "%TARGET:~-1%"=="\" set "TARGET=%TARGET:~0,-1%"
 
 echo.
+echo Output type:
+echo   1) same size - keep every byte and the exact file size (default)
+echo   2) RGB24     - convert YUV to RGB; the file becomes 2x larger
+set "CHOICE="
+set /p "CHOICE=Choice [1]: "
+
+set "OUTFMT=copy"
+if "%CHOICE%"=="2" set "OUTFMT=rgb24"
+set "OPTIONS=--out-format %OUTFMT%"
+
+if not "%OUTFMT%"=="rgb24" goto :run
+
+echo.
 set "SIZE=%DEFAULT_SIZE%"
 if defined DEFAULT_SIZE (
     echo Input resolution as WxH. Press Enter to keep %DEFAULT_SIZE%.
@@ -62,6 +75,9 @@ if defined DEFAULT_SIZE (
 )
 set /p "SIZE=Resolution: "
 if defined SIZE set "OPTIONS=%OPTIONS% --size %SIZE%"
+
+:run
+if defined EXTRA set "OPTIONS=%OPTIONS% %EXTRA%"
 
 echo.
 echo target : %TARGET%
