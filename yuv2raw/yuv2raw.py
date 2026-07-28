@@ -40,7 +40,7 @@ except Exception:  # pragma: no cover - numpy 미설치 환경
 if os.environ.get("YUV2RAW_NO_NUMPY"):
     _np = None
 
-VERSION = "1.0.1"
+VERSION = "1.2.0"
 
 FIX = 16          # 고정소수점 비트 수
 FIX_ONE = 1 << FIX
