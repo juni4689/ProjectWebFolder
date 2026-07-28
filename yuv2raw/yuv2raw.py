@@ -40,7 +40,7 @@ except Exception:  # pragma: no cover - numpy 미설치 환경
 if os.environ.get("YUV2RAW_NO_NUMPY"):
     _np = None
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 FIX = 16          # 고정소수점 비트 수
 FIX_ONE = 1 << FIX
@@ -933,11 +933,12 @@ class Job(object):
 
 class Options(object):
     __slots__ = ("out_format", "matrix", "color_range", "chroma", "overwrite",
-                 "allow_partial", "max_frames", "sidecar", "buffer_frames")
+                 "allow_partial", "max_frames", "sidecar", "buffer_frames",
+                 "preview")
 
-    def __init__(self, out_format="rgb24", matrix="auto", color_range="limited",
+    def __init__(self, out_format=RGB_SAME, matrix="auto", color_range="limited",
                  chroma="nearest", overwrite=False, allow_partial=False,
-                 max_frames=0, sidecar=True, buffer_frames=1):
+                 max_frames=0, sidecar=True, buffer_frames=1, preview=False):
         self.out_format = out_format
         self.matrix = matrix
         self.color_range = color_range
@@ -947,6 +948,7 @@ class Options(object):
         self.max_frames = max_frames
         self.sidecar = sidecar
         self.buffer_frames = buffer_frames
+        self.preview = preview
 
 
 def geometry_ok(fmt, size):
@@ -1081,6 +1083,10 @@ def run_job(job):
     try:
         with open(job.src, "rb") as fin, open(tmp, "wb") as fout:
             if kind == "copy":
+                if opts.preview and job.width:
+                    _write_preview(job.dst + ".preview.png", fin.read(in_fsize),
+                                   fmt, job, matrix, opts)
+                    fin.seek(0)
                 # 큰 파일도 메모리에 다 올리지 않도록 조각내어 옮긴다.
                 remaining = expected
                 while remaining > 0:
@@ -1091,10 +1097,13 @@ def run_job(job):
                     written += len(chunk)
                     remaining -= len(chunk)
             else:
-                for _ in range(job.frames):
+                for index in range(job.frames):
                     data = fin.read(in_fsize)
                     if len(data) != in_fsize:
                         raise ConversionError("프레임을 끝까지 읽지 못했습니다.")
+                    if opts.preview and index == 0:
+                        _write_preview(job.dst + ".preview.png", data, fmt, job,
+                                       matrix, opts)
                     out = convert_frame(data, fmt, job.width, job.height,
                                         job.out_format, tables, opts.chroma)
                     if len(out) != out_fsize:
@@ -1145,6 +1154,18 @@ def run_job(job):
     return info
 
 
+def _write_preview(path, data, fmt, job, matrix, opts):
+    """첫 프레임을 PNG 로 저장한다.
+
+    뷰어 설정과 무관하게 변환 결과를 눈으로 확인할 수 있게 해 준다.
+    출력 포맷의 채널 비트를 그대로 반영하므로 실제 .raw 에 담긴 색 단계가 보인다.
+    """
+    tables = ColorTables(fmt, 8, matrix, opts.color_range)
+    rgb = convert_frame(data, fmt, job.width, job.height, "rgb24", tables,
+                        opts.chroma)
+    write_png(path, quantize_preview(rgb, job.out_format), job.width, job.height)
+
+
 def _worker(payload):
     """멀티프로세싱용 진입점. (성공여부, 정보/에러메시지) 를 돌려준다."""
     job, index = payload
@@ -1168,6 +1189,58 @@ def planned_output_bytes(job):
     if OUT_FORMATS[job.out_format][0] == "copy":
         return min(total, src_bytes)
     return total
+
+
+#: 출력 포맷별 채널당 비트 수(미리보기에서 실제 손실을 그대로 보여주기 위함)
+CHANNEL_BITS = {
+    "rgb332": (3, 3, 2),
+    "rgb444": (4, 4, 4),
+    "rgb565le": (5, 6, 5),
+}
+
+
+def quantize_preview(rgb, out_format):
+    """8비트 RGB 를 출력 포맷의 채널 비트로 눌렀다가 되돌린다.
+
+    미리보기 PNG 가 실제 .raw 에 담긴 색 단계를 그대로 보여주게 만든다.
+    """
+    bits = CHANNEL_BITS.get(out_format)
+    if bits is None:
+        return rgb
+    luts = []
+    for n in bits:
+        top = (1 << n) - 1
+        down = [(v * top + 127) // 255 for v in range(256)]
+        luts.append([q * 255 // top for q in down])
+    out = bytearray(rgb)
+    for ch in range(3):
+        lut = luts[ch]
+        out[ch::3] = bytes(lut[v] for v in rgb[ch::3])
+    return bytes(out)
+
+
+def write_png(path, rgb, width, height):
+    """8비트 RGB 바이트열을 PNG 로 저장한다(표준 라이브러리만 사용)."""
+    import struct
+    import zlib
+
+    raw = bytearray()
+    stride = width * 3
+    for row in range(height):
+        raw.append(0)                                   # 필터 없음
+        raw += rgb[row * stride:(row + 1) * stride]
+
+    def chunk(tag, data):
+        body = tag + data
+        return (struct.pack(">I", len(data)) + body
+                + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF))
+
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+           + chunk(b"IEND", b""))
+    with open(path, "wb") as f:
+        f.write(png)
 
 
 def collect_inputs(paths, patterns, recursive):
@@ -1245,11 +1318,11 @@ def build_parser():
                    help="입력 해상도. 생략하면 파일 이름과 크기로 자동 판별")
     p.add_argument("--format", metavar="FMT",
                    help="입력 YUV 포맷. 생략하면 파일 이름으로 자동 판별 (기본 추정값: i420)")
-    p.add_argument("--out-format", default="rgb24",
+    p.add_argument("--out-format", default=RGB_SAME,
                    choices=sorted(OUT_FORMATS) + [RGB_SAME], metavar="FMT",
-                   help="출력 RAW 포맷 (기본: rgb24). 크기를 유지하려면 copy, "
-                        "RGB 로 바꾸면서 크기도 유지하려면 %s. --list-formats 참고"
-                        % RGB_SAME)
+                   help="출력 RAW 포맷 (기본: rgb-same = RGB 로 바꾸면서 파일 "
+                        "크기 유지). 색 변환 없이 크기만 유지하려면 copy, "
+                        "화질이 가장 좋은 것은 rgb24. --list-formats 참고")
     p.add_argument("--matrix", default="auto",
                    choices=["auto", "bt601", "bt709", "bt2020"],
                    help="색변환 행렬 (기본: auto = 720p 이상이면 bt709)")
@@ -1274,6 +1347,9 @@ def build_parser():
                    help="출력 정보를 담은 .json 사이드카를 만들지 않는다")
     p.add_argument("-j", "--jobs", default="auto", metavar="N",
                    help="동시에 변환할 파일 수 (기본: auto)")
+    p.add_argument("--preview", action="store_true",
+                   help="변환 결과 첫 프레임을 PNG 로도 저장한다. 뷰어 설정과 "
+                        "무관하게 결과를 눈으로 확인할 수 있다")
     p.add_argument("--dry-run", action="store_true",
                    help="실제로 변환하지 않고 계획만 출력한다")
     p.add_argument("-q", "--quiet", action="store_true", help="진행 로그를 줄인다")
@@ -1370,7 +1446,8 @@ def main(argv=None):
         out_format=args.out_format, matrix=args.matrix,
         color_range=args.color_range, chroma=args.chroma,
         overwrite=args.overwrite, allow_partial=args.allow_partial,
-        max_frames=max(0, args.frames), sidecar=not args.no_sidecar)
+        max_frames=max(0, args.frames), sidecar=not args.no_sidecar,
+        preview=args.preview)
 
     patterns = [p.strip() for p in args.pattern.split(",") if p.strip()]
 

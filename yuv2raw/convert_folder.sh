@@ -35,20 +35,7 @@ if [ -z "$TARGET" ]; then
     exit 1
 fi
 
-OUTFMT="$2"
-if [ -z "$OUTFMT" ]; then
-    echo "출력 방식:"
-    echo "  1) 크기 그대로    - 바이트를 그대로 옮김 (기본)"
-    echo "  2) RGB24         - RGB 로 변환, 파일이 약 2배로 커짐"
-    echo "  3) RGB + 크기유지 - RGB 로 변환하면서 크기도 유지 (색 단계가 줄어듦)"
-    printf '선택 [1]: '
-    read -r CHOICE
-    case "$CHOICE" in
-        2) OUTFMT="rgb24" ;;
-        3) OUTFMT="rgb-same" ;;
-        *) OUTFMT="copy" ;;
-    esac
-fi
+OUTFMT="${2:-rgb-same}"
 OPTIONS="--out-format $OUTFMT"
 
 if [ "$OUTFMT" != "copy" ]; then

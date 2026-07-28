@@ -778,7 +778,8 @@ class TestFileConversion(unittest.TestCase):
         before = {p: (os.path.getsize(p), open(p, "rb").read()) for p in srcs}
 
         out_dir = os.path.join(self.dir, "out")
-        rc = y2r.main([self.src_dir, "-o", out_dir, "-q"])
+        rc = y2r.main([self.src_dir, "-o", out_dir, "-q",
+                       "--out-format", "rgb24"])
         self.assertEqual(rc, 0)
 
         # 원본은 그대로여야 한다
@@ -798,7 +799,8 @@ class TestFileConversion(unittest.TestCase):
     def test_sidecar_contents(self):
         self._make_yuv("clip_32x16_nv12.yuv", 32, 16, frames=3, fmt_name="nv12")
         out_dir = os.path.join(self.dir, "out")
-        self.assertEqual(y2r.main([self.src_dir, "-o", out_dir, "-q"]), 0)
+        self.assertEqual(y2r.main([self.src_dir, "-o", out_dir, "-q",
+                                   "--out-format", "rgb24"]), 0)
         sidecar = os.path.join(out_dir, "clip_32x16_nv12_32x16_rgb24.raw.json")
         with open(sidecar, encoding="utf-8") as f:
             info = json.load(f)
@@ -813,14 +815,15 @@ class TestFileConversion(unittest.TestCase):
     def test_multi_frame_output_size(self):
         self._make_yuv("m_16x16_i420.yuv", 16, 16, frames=5)
         out_dir = os.path.join(self.dir, "out")
-        y2r.main([self.src_dir, "-o", out_dir, "-q"])
+        y2r.main([self.src_dir, "-o", out_dir, "-q", "--out-format", "rgb24"])
         path = os.path.join(out_dir, "m_16x16_i420_16x16_rgb24.raw")
         self.assertEqual(os.path.getsize(path), 16 * 16 * 3 * 5)
 
     def test_frame_limit(self):
         self._make_yuv("m_16x16_i420.yuv", 16, 16, frames=5)
         out_dir = os.path.join(self.dir, "out")
-        y2r.main([self.src_dir, "-o", out_dir, "-q", "--frames", "2"])
+        y2r.main([self.src_dir, "-o", out_dir, "-q", "--frames", "2",
+                  "--out-format", "rgb24"])
         path = os.path.join(out_dir, "m_16x16_i420_16x16_rgb24.raw")
         self.assertEqual(os.path.getsize(path), 16 * 16 * 3 * 2)
 
@@ -842,7 +845,8 @@ class TestFileConversion(unittest.TestCase):
             payload += pack(fmt, 16, 16, y, u, v)
         self._write("bad_16x16_i420.yuv", payload[:-7])
         out_dir = os.path.join(self.dir, "out")
-        rc = y2r.main([self.src_dir, "-o", out_dir, "-q", "--allow-partial"])
+        rc = y2r.main([self.src_dir, "-o", out_dir, "-q", "--allow-partial",
+                       "--out-format", "rgb24"])
         self.assertEqual(rc, 0)
         path = os.path.join(out_dir, "bad_16x16_i420_16x16_rgb24.raw")
         self.assertEqual(os.path.getsize(path), 16 * 16 * 3)  # 온전한 1프레임만
@@ -856,15 +860,16 @@ class TestFileConversion(unittest.TestCase):
     def test_existing_output_is_skipped_then_overwritten(self):
         self._make_yuv("a_16x16_i420.yuv", 16, 16)
         out_dir = os.path.join(self.dir, "out")
-        y2r.main([self.src_dir, "-o", out_dir, "-q"])
+        args = ["--out-format", "rgb24"]
+        y2r.main([self.src_dir, "-o", out_dir, "-q"] + args)
         path = os.path.join(out_dir, "a_16x16_i420_16x16_rgb24.raw")
         os.utime(path, (0, 0))
         marker = os.path.getmtime(path)
 
-        y2r.main([self.src_dir, "-o", out_dir, "-q"])          # 건너뛰어야 함
+        y2r.main([self.src_dir, "-o", out_dir, "-q"] + args)   # 건너뛰어야 함
         self.assertEqual(os.path.getmtime(path), marker)
 
-        y2r.main([self.src_dir, "-o", out_dir, "-q", "--overwrite"])
+        y2r.main([self.src_dir, "-o", out_dir, "-q", "--overwrite"] + args)
         self.assertNotEqual(os.path.getmtime(path), marker)
 
     def test_default_output_dir_is_new_subfolder(self):
@@ -921,8 +926,8 @@ class TestFileConversion(unittest.TestCase):
         y, u, v = make_planes(16, 16, fmt)
         self._write("mislabeled_i420.yuv", pack(fmt, 16, 16, y, u, v))
         out_dir = os.path.join(self.dir, "out")
-        rc = y2r.main([self.src_dir, "-o", out_dir, "-q",
-                       "--size", "16x16", "--format", "nv12"])
+        rc = y2r.main([self.src_dir, "-o", out_dir, "-q", "--out-format",
+                       "rgb24", "--size", "16x16", "--format", "nv12"])
         self.assertEqual(rc, 0)
         ref = convert(y2r, pack(fmt, 16, 16, y, u, v), fmt, 16, 16)
         with open(os.path.join(out_dir, "mislabeled_i420_16x16_rgb24.raw"), "rb") as f:
@@ -935,6 +940,41 @@ class TestFileConversion(unittest.TestCase):
         self.assertEqual(y2r.main([self.src_dir, "-o", out_dir, "-q", "-j", "2"]), 0)
         self.assertEqual(
             len([n for n in os.listdir(out_dir) if n.endswith(".raw")]), 4)
+
+    def test_default_output_format_is_rgb_same(self):
+        self._make_yuv("a_16x16_i420.yuv", 16, 16)
+        out_dir = os.path.join(self.dir, "out")
+        self.assertEqual(y2r.main([self.src_dir, "-o", out_dir, "-q"]), 0)
+        # 기본값은 rgb-same: 4:2:0 이므로 rgb444 가 선택되고 크기가 유지된다
+        out = os.path.join(out_dir, "a_16x16_i420_16x16_rgb444.raw")
+        self.assertTrue(os.path.exists(out), os.listdir(out_dir))
+        self.assertEqual(os.path.getsize(out),
+                         os.path.getsize(os.path.join(self.src_dir,
+                                                      "a_16x16_i420.yuv")))
+        self.assertEqual(y2r.Options().out_format, y2r.RGB_SAME)
+
+    def test_preview_png_is_written(self):
+        self._make_yuv("a_16x16_i420.yuv", 16, 16)
+        out_dir = os.path.join(self.dir, "out")
+        y2r.main([self.src_dir, "-o", out_dir, "-q", "--preview"])
+        png = os.path.join(out_dir, "a_16x16_i420_16x16_rgb444.raw.preview.png")
+        self.assertTrue(os.path.exists(png), os.listdir(out_dir))
+        with open(png, "rb") as f:
+            head = f.read(8)
+        self.assertEqual(head, b"\x89PNG\r\n\x1a\n")
+
+    def test_preview_matches_output_color_depth(self):
+        # 미리보기는 실제 출력의 색 단계를 반영해야 한다
+        rgb = bytes([10, 100, 200] * 4)     # 4비트 격자에 안 맞는 값들
+        self.assertEqual(y2r.quantize_preview(rgb, "rgb24"), rgb)
+        self.assertEqual(y2r.quantize_preview(rgb, "copy"), rgb)
+        reduced = y2r.quantize_preview(rgb, "rgb444")
+        self.assertNotEqual(reduced, rgb)
+        for v in reduced:
+            self.assertEqual(v % 17, 0)     # 4비트 단계는 17의 배수
+        # 3-3-2 는 파랑 채널만 4단계
+        r332 = y2r.quantize_preview(rgb, "rgb332")
+        self.assertEqual(sorted(set(r332[2::3])), [170])   # 200 -> 2/3 단계
 
     def test_empty_folder(self):
         self.assertEqual(y2r.main([self.src_dir, "-q"]), 1)

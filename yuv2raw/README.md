@@ -16,24 +16,21 @@
 `convert_folder.bat` **위로 변환할 폴더를 끌어다 놓으면** 끝입니다.
 (더블클릭한 뒤 폴더 경로를 입력해도 됩니다.)
 
-실행하면 **출력 방식을 물어봅니다.**
+**RGB 로 변환하면서 파일 크기를 그대로 유지합니다**(`--out-format rgb-same`).
+물어보는 건 해상도 하나뿐입니다.
 
 ```
-Output type:
-  1) same size      - keep every byte; the file size never changes (default)
-  2) RGB24          - convert to RGB; the file becomes 2x larger
-  3) RGB, same size - convert to RGB and keep the file size
-                      (fewer colour steps: 4 bits per channel for 4:2:0)
-Choice [1]:
+Input resolution as WxH, for example 2560x1440.
+Press Enter to detect it from the file name and size.
+Resolution: 2560x1440
 ```
 
-- **1번(기본)** — 바이트를 그대로 옮깁니다. **파일 크기가 1바이트도 바뀌지 않습니다.**
-  해상도를 몰라도 되고, 물어보지도 않습니다.
-- **2번** — RGB24 로 변환합니다. 화질은 가장 좋지만 파일이 2배가 됩니다.
-- **3번** — **RGB 로 바꾸면서 크기도 유지합니다.** 대신 색 단계가 줄어듭니다.
+입력한 값은 파일 이름보다 우선하고, Enter 를 치면 자동 판별합니다.
 
-2번과 3번은 해상도를 물어봅니다. 입력한 값은 파일 이름보다 우선하고,
-Enter 를 치면 자동 판별합니다.
+**결과가 이상해 보이면 `--preview` 를 켜세요.** 배치 파일 안의
+`set "EXTRA="` 을 `set "EXTRA=--preview"` 로 고치면, `.raw` 옆에
+첫 프레임 `.png` 가 같이 생깁니다. 뷰어 설정과 무관하게 변환 결과를
+바로 눈으로 확인할 수 있습니다.
 
 매번 같은 해상도를 쓴다면 `convert_folder.bat` 을 메모장으로 열어
 `set "DEFAULT_SIZE="` 줄을 이렇게 고쳐 두세요.
@@ -56,18 +53,24 @@ set "DEFAULT_SIZE=2560x1440"
 ### macOS · Linux
 
 ```bash
-./convert_folder.sh /경로/yuv_폴더                  # 물어보면서 진행
-./convert_folder.sh /경로/yuv_폴더 copy             # 크기 그대로
-./convert_folder.sh /경로/yuv_폴더 rgb24 2560x1440  # RGB24 + 해상도 지정
+./convert_folder.sh /경로/yuv_폴더                     # RGB + 크기 유지
+./convert_folder.sh /경로/yuv_폴더 rgb-same 2560x1440  # 해상도까지 지정
+./convert_folder.sh /경로/yuv_폴더 copy                # 색 변환 없이 크기 유지
 ```
 
 ### 명령줄
 
 ```bash
-# 폴더 전체를 RGB24 raw 로 변환 (결과: <폴더>/raw_out)
+# 폴더 전체 변환 (기본: RGB + 파일 크기 유지, 결과는 <폴더>/raw_out)
 python yuv2raw.py /경로/yuv_폴더
 
-# 파일 크기를 그대로 두고 .raw 로만 (해상도 몰라도 됨)
+# 결과를 눈으로 확인 — .raw 옆에 첫 프레임 .png 를 같이 만듭니다
+python yuv2raw.py /경로/yuv_폴더 --preview
+
+# 화질 우선 (파일이 2배로 커짐)
+python yuv2raw.py /경로/yuv_폴더 --out-format rgb24
+
+# 색 변환 없이 크기만 유지 (해상도 몰라도 됨)
 python yuv2raw.py /경로/yuv_폴더 --out-format copy
 
 # 해상도를 직접 지정 (파일 이름보다 우선)
@@ -269,8 +272,8 @@ python yuv2raw.py [경로 ...] [옵션]
   -o, --output 폴더     출력 폴더 (기본: 입력 폴더 아래 raw_out)
       --size WxH        입력 해상도 (기본: 자동 판별)
       --format FMT      입력 YUV 포맷 (기본: 자동 판별)
-      --out-format FMT  출력 RAW 포맷 (기본: rgb24)
-                        크기 유지: copy / RGB+크기유지: rgb-same
+      --out-format FMT  출력 RAW 포맷 (기본: rgb-same = RGB + 크기 유지)
+                        화질 우선: rgb24 / 색 변환 없이 크기 유지: copy
       --matrix M        색변환 행렬 (기본: auto)
       --range R         limited | full (기본: limited)
       --chroma C        nearest | bilinear (기본: nearest)
@@ -282,6 +285,7 @@ python yuv2raw.py [경로 ...] [옵션]
       --plain-name      출력 이름을 <원본이름>.raw 로
       --no-sidecar      .json 사이드카를 만들지 않음
   -j, --jobs N          동시에 변환할 파일 수 (기본: auto)
+      --preview         첫 프레임을 .png 로도 저장 (결과 확인용)
       --dry-run         계획만 출력하고 파일은 만들지 않음
   -q, --quiet           로그 줄이기
       --list-formats    지원 포맷 목록 출력
@@ -324,12 +328,50 @@ python yuv2raw.py ./in --frames 1
 
 ---
 
-## 9. 문제 해결
+## 9. 결과가 이상해 보일 때 먼저 할 것: `--preview`
+
+`.raw` 는 헤더가 없어서 **뷰어 설정 하나만 틀려도 완전히 다르게 보입니다.**
+문제가 변환에 있는지 뷰어에 있는지부터 가르는 게 순서입니다.
+
+```bash
+python yuv2raw.py ./in --preview
+```
+
+`.raw` 옆에 `.raw.preview.png` 가 생깁니다. 이 PNG 는 **실제 .raw 에 담긴
+색 단계를 그대로 반영**하므로, 여기서 멀쩡해 보이면 변환은 정상이고
+뷰어 설정 문제입니다. PNG 부터 이상하면 해상도나 입력 포맷이 틀린 것입니다.
+
+### 계단현상(밴딩)과 점무늬가 보인다면
+
+`rgb-same` 은 **파일 크기를 유지하려고 색 단계를 줄입니다.** 줄어드는 정도는
+입력에 따라 다릅니다.
+
+| 입력 | 고르는 RGB | 색 단계 | 눈에 띄는 정도 |
+|---|---|---|---|
+| 흑백 8비트 | `rgb332` | 채널당 3-3-2비트 | **매우 큼** — 하늘 계단현상, 점무늬 |
+| 4:2:0 8비트 | `rgb444` | 채널당 4비트 | 그라데이션에 계단 |
+| 4:2:2 8비트 | `rgb565le` | 채널당 5-6-5비트 | 대체로 무난 |
+| 4:4:4 또는 10비트 이상 | `rgb24` 등 | 손실 없음 | **없음** |
+
+특히 **흑백 8비트 소스는 픽셀당 8비트 안에 R,G,B 를 모두 넣어야 하므로
+심하게 뭉개집니다.** 이 경우 선택지는 셋입니다.
+
+```bash
+python yuv2raw.py ./in --out-format copy      # 원본 그대로 (크기 유지, 손실 0)
+python yuv2raw.py ./in --out-format rgb24     # 화질 우선 (크기 3배)
+python yuv2raw.py ./in --out-format gray8     # 흑백 그대로 (크기 유지, 손실 0)
+```
+
+---
+
+## 10. 문제 해결
 
 | 메시지 / 증상 | 원인과 해결 |
 |---|---|
 | `파일 크기가 프레임 크기의 배수가 아닙니다` | 해상도나 포맷이 실제와 다릅니다. `--size` / `--format` 을 확인하세요. 끝이 잘린 파일이 확실하면 `--allow-partial`. |
 | `해상도 후보가 여러 개라 자동 판별할 수 없습니다` | `--size 1920x1080` 처럼 직접 지정하세요. |
+| 하늘·그라데이션에 계단현상, 점무늬 | `rgb-same` 이 크기를 맞추려고 색 단계를 줄인 것입니다. `--preview` 로 확인하고, 화질이 필요하면 `--out-format rgb24`(크기 증가) 또는 `copy`(손실 없음). |
+| 결과가 흑백으로만 나옴 | 입력에 색 정보가 없거나(흑백 소스), 뷰어가 한 채널만 보고 있습니다. `--preview` 로 구분하세요. |
 | 변환하면 파일 크기가 2배가 됨 | RGB24 는 픽셀당 3바이트라 4:2:0(1.5바이트) 대비 항상 2배입니다. 크기를 유지하려면 `--out-format copy`(색 변환 없음) 또는 `--out-format rgb-same`(RGB 로 변환). |
 | 파일마다 크기가 다른데 출력은 다 같은 크기 | `--size` 를 준 상태라 모든 파일을 같은 해상도로 읽고 있습니다. `--size` 를 빼거나 `--out-format copy` 를 쓰세요. |
 | 해상도가 실제와 다르게 나옴 | 파일 이름의 해상도를 쓴 것입니다. `--size` 로 지정하거나, `convert_folder.bat` 실행 시 해상도를 입력하세요. |
@@ -349,5 +391,5 @@ python3 tests/test_yuv2raw.py            # numpy 경로
 YUV2RAW_NO_NUMPY=1 python3 tests/test_yuv2raw.py   # 순수 파이썬 경로
 ```
 
-74개 테스트가 포맷 해석, 색 정확도, 두 백엔드의 바이트 단위 일치,
+77개 테스트가 포맷 해석, 색 정확도, 두 백엔드의 바이트 단위 일치,
 잘린 파일 거부, 크기 보존, RGB 패킹, 원본 미변경 등을 확인합니다.
