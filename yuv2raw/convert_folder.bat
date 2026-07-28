@@ -5,8 +5,8 @@ rem
 rem  Usage 1) Drag a folder onto this file.
 rem  Usage 2) Double-click, then type the folder path.
 rem
-rem  It converts YUV to RGB while keeping the exact file size
-rem  (--out-format rgb-same) and asks only for the resolution.
+rem  It converts YUV to 8-bit grayscale (--out-format gray8) and asks
+rem  only for the resolution. Set OUTFMT below to change that.
 rem
 rem  Add --preview to EXTRA below to also get a .png of the first frame,
 rem  so you can check the result without any viewer settings.
@@ -23,6 +23,7 @@ rem        so non-ASCII bytes here corrupt line parsing.
 rem  ---------------------------------------------------------------------
 setlocal
 
+set "OUTFMT=gray8"
 set "DEFAULT_SIZE="
 set "EXTRA="
 rem  example: set "EXTRA=--preview"
@@ -55,7 +56,7 @@ if not defined TARGET (
 rem strip a trailing backslash so the quoted path cannot escape its quote
 if "%TARGET:~-1%"=="\" set "TARGET=%TARGET:~0,-1%"
 
-set "OPTIONS=--out-format rgb-same"
+set "OPTIONS=--out-format %OUTFMT%"
 
 echo.
 set "SIZE=%DEFAULT_SIZE%"

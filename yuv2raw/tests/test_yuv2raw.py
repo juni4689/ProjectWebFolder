@@ -609,10 +609,22 @@ class TestContentDetection(unittest.TestCase):
             f.write(bytes(blob))
         out_dir = os.path.join(self.dir, "out")
         self.assertEqual(y2r.main([src_dir, "-o", out_dir, "-q"]), 0)
-        # 4:2:2 이므로 rgb-same 은 rgb565le 를 고르고 크기가 유지된다
-        out = os.path.join(out_dir, "Aaa_320x180_rgb565le.raw")
+        # 이름에 힌트가 없어도 4:2:2 로 판별되고, 기본값대로 흑백이 나온다
+        out = os.path.join(out_dir, "Aaa_320x180_gray8.raw")
         self.assertTrue(os.path.exists(out), os.listdir(out_dir))
-        self.assertEqual(os.path.getsize(out), len(blob))
+        self.assertEqual(os.path.getsize(out), w * h)
+
+    def test_grayscale_output_has_no_colour(self):
+        # 흑백 출력은 휘도만 담는다. 크로마가 무엇이든 결과가 같아야 한다.
+        w, h = 32, 16
+        fmt = y2r.resolve_format("i420")
+        yy, _, _ = make_planes(w, h, fmt)
+        flat = [128] * (w // 2 * (h // 2))
+        wild = [20] * (w // 2 * (h // 2))
+        a = convert(y2r, pack(fmt, w, h, yy, flat, flat), fmt, w, h, "gray8")
+        b = convert(y2r, pack(fmt, w, h, yy, wild, wild), fmt, w, h, "gray8")
+        self.assertEqual(a, b)
+        self.assertEqual(len(a), w * h)
 
     def test_gives_up_on_random_data(self):
         # 규칙성이 없는 데이터에 억지로 답을 내놓으면 안 된다
@@ -1064,23 +1076,25 @@ class TestFileConversion(unittest.TestCase):
         self.assertEqual(
             len([n for n in os.listdir(out_dir) if n.endswith(".raw")]), 4)
 
-    def test_default_output_format_is_rgb_same(self):
+    def test_default_output_format_is_gray8(self):
         self._make_yuv("a_16x16_i420.yuv", 16, 16)
         out_dir = os.path.join(self.dir, "out")
         self.assertEqual(y2r.main([self.src_dir, "-o", out_dir, "-q"]), 0)
-        # 기본값은 rgb-same: 4:2:0 이므로 rgb444 가 선택되고 크기가 유지된다
-        out = os.path.join(out_dir, "a_16x16_i420_16x16_rgb444.raw")
+        # 기본값은 흑백 8비트. 컬러로 변환하지 않는다.
+        out = os.path.join(out_dir, "a_16x16_i420_16x16_gray8.raw")
         self.assertTrue(os.path.exists(out), os.listdir(out_dir))
-        self.assertEqual(os.path.getsize(out),
-                         os.path.getsize(os.path.join(self.src_dir,
-                                                      "a_16x16_i420.yuv")))
-        self.assertEqual(y2r.Options().out_format, y2r.RGB_SAME)
+        self.assertEqual(os.path.getsize(out), 16 * 16)
+        self.assertEqual(y2r.Options().out_format, "gray8")
+
+    def test_default_is_not_colour(self):
+        # 기본 출력에는 색 정보가 들어가면 안 된다
+        self.assertEqual(y2r.OUT_FORMATS[y2r.Options().out_format][0], "gray")
 
     def test_preview_png_is_written(self):
         self._make_yuv("a_16x16_i420.yuv", 16, 16)
         out_dir = os.path.join(self.dir, "out")
         y2r.main([self.src_dir, "-o", out_dir, "-q", "--preview"])
-        png = os.path.join(out_dir, "a_16x16_i420_16x16_rgb444.raw.preview.png")
+        png = os.path.join(out_dir, "a_16x16_i420_16x16_gray8.raw.preview.png")
         self.assertTrue(os.path.exists(png), os.listdir(out_dir))
         with open(png, "rb") as f:
             head = f.read(8)

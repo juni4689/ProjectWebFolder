@@ -40,7 +40,7 @@ except Exception:  # pragma: no cover - numpy 미설치 환경
 if os.environ.get("YUV2RAW_NO_NUMPY"):
     _np = None
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 
 FIX = 16          # 고정소수점 비트 수
 FIX_ONE = 1 << FIX
@@ -1109,7 +1109,7 @@ class Options(object):
                  "allow_partial", "max_frames", "sidecar", "buffer_frames",
                  "preview")
 
-    def __init__(self, out_format=RGB_SAME, matrix="auto", color_range="limited",
+    def __init__(self, out_format="gray8", matrix="auto", color_range="limited",
                  chroma="nearest", overwrite=False, allow_partial=False,
                  max_frames=0, sidecar=True, buffer_frames=1, preview=False):
         self.out_format = out_format
@@ -1361,8 +1361,18 @@ def _write_preview(path, data, fmt, job, matrix, opts):
     출력 포맷의 채널 비트를 그대로 반영하므로 실제 .raw 에 담긴 색 단계가 보인다.
     """
     tables = ColorTables(fmt, 8, matrix, opts.color_range)
-    rgb = convert_frame(data, fmt, job.width, job.height, "rgb24", tables,
-                        opts.chroma)
+    if OUT_FORMATS[job.out_format][0] == "gray":
+        # 출력이 흑백이면 미리보기도 흑백이어야 한다
+        luma = convert_frame(data, fmt, job.width, job.height, "gray8", tables,
+                             opts.chroma)
+        rgb = bytearray(len(luma) * 3)
+        rgb[0::3] = luma
+        rgb[1::3] = luma
+        rgb[2::3] = luma
+        rgb = bytes(rgb)
+    else:
+        rgb = convert_frame(data, fmt, job.width, job.height, "rgb24", tables,
+                            opts.chroma)
     write_png(path, quantize_preview(rgb, job.out_format), job.width, job.height)
 
 
@@ -1518,11 +1528,11 @@ def build_parser():
                    help="입력 해상도. 생략하면 파일 이름과 크기로 자동 판별")
     p.add_argument("--format", metavar="FMT",
                    help="입력 YUV 포맷. 생략하면 파일 이름으로 자동 판별 (기본 추정값: i420)")
-    p.add_argument("--out-format", default=RGB_SAME,
+    p.add_argument("--out-format", default="gray8",
                    choices=sorted(OUT_FORMATS) + [RGB_SAME], metavar="FMT",
-                   help="출력 RAW 포맷 (기본: rgb-same = RGB 로 바꾸면서 파일 "
-                        "크기 유지). 색 변환 없이 크기만 유지하려면 copy, "
-                        "화질이 가장 좋은 것은 rgb24. --list-formats 참고")
+                   help="출력 RAW 포맷 (기본: gray8 = 흑백 8비트). "
+                        "흑백이면서 크기까지 유지하려면 4:2:2 입력에 gray16le, "
+                        "컬러가 필요하면 rgb24 나 rgb-same. --list-formats 참고")
     p.add_argument("--matrix", default="auto",
                    choices=["auto", "bt601", "bt709", "bt2020"],
                    help="색변환 행렬 (기본: auto = 720p 이상이면 bt709)")
