@@ -40,7 +40,7 @@ except Exception:  # pragma: no cover - numpy 미설치 환경
 if os.environ.get("YUV2RAW_NO_NUMPY"):
     _np = None
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 FIX = 16          # 고정소수점 비트 수
 FIX_ONE = 1 << FIX
@@ -1089,7 +1089,23 @@ def resolve_jobs_count(value, job_count):
     return max(1, n)
 
 
+def make_console_safe():
+    """콘솔이 표현하지 못하는 글자가 섞여도 변환이 중단되지 않게 한다.
+
+    윈도우 명령 프롬프트는 CP949 같은 좁은 코드페이지를 쓴다. 파일 이름에
+    그 코드페이지에 없는 글자가 있으면 print 하나 때문에 전체 작업이
+    UnicodeEncodeError 로 죽을 수 있어서, 표시할 수 없는 글자는 대체 문자로
+    찍고 넘어가게 한다.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass  # 파이썬 3.6 이거나 리다이렉트된 스트림
+
+
 def main(argv=None):
+    make_console_safe()
     parser = build_parser()
     args = parser.parse_args(argv)
 
